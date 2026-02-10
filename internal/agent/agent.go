@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -25,14 +27,19 @@ type Agent struct {
 	targetBase  *url.URL
 	wsReadLimit int64
 
+	httpClient    *http.Client
+	httpTransport *http.Transport
+}
+
+type connState struct {
+	a *Agent
+
 	ws      *websocket.Conn
 	writeMu sync.Mutex
 
 	streamMu sync.Mutex
 	streams  map[uint32]*stream
-
-	httpClient    *http.Client
-	httpTransport *http.Transport
+	wg       sync.WaitGroup
 }
 
 type stream struct {
@@ -58,7 +65,6 @@ func New(registerURL *url.URL, token string, targetBase *url.URL) *Agent {
 		token:         token,
 		targetBase:    targetBase,
 		wsReadLimit:   shared.WSReadLimitBytes,
-		streams:       make(map[uint32]*stream),
 		httpTransport: transport,
 		httpClient: &http.Client{
 			Transport: transport,
@@ -67,36 +73,130 @@ func New(registerURL *url.URL, token string, targetBase *url.URL) *Agent {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	attempt := 0
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+		h := http.Header{}
+		h.Set("X-Token", a.token)
+
+		ws, _, err := dialer.DialContext(ctx, a.registerURL.String(), h)
+		if err != nil {
+			attempt++
+			wait := reconnectBackoff(rnd, attempt)
+			log.Printf("[https-proxy-agent] dial failed (attempt=%d) register_url=%s err=%v; retry in %s", attempt, a.registerURL.String(), err, wait)
+			if !sleepWithContext(ctx, wait) {
+				return ctx.Err()
+			}
+			continue
+		}
+
+		// Reset backoff after a successful connect.
+		attempt = 0
+
+		s := &connState{
+			a:       a,
+			ws:      ws,
+			streams: make(map[uint32]*stream),
+		}
+
+		log.Printf("[https-proxy-agent] connected register_url=%s target=%s", a.registerURL.String(), a.targetBase.String())
+
+		// Ensure ctrl+C (ctx cancellation) unblocks ReadMessage promptly.
+		connCtx, cancel := context.WithCancel(ctx)
+		go func() {
+			<-connCtx.Done()
+			s.writeMu.Lock()
+			_ = s.ws.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			_ = s.ws.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseGoingAway, "agent shutting down"),
+				time.Now().Add(2*time.Second),
+			)
+			s.writeMu.Unlock()
+			_ = s.ws.SetReadDeadline(time.Now())
+			_ = s.ws.Close()
+		}()
+
+		err = s.run(connCtx)
+		cancel()
+
+		s.closeAllStreams()
+		s.wg.Wait()
+		_ = ws.Close()
+		if a.httpTransport != nil {
+			a.httpTransport.CloseIdleConnections()
+		}
+
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if code, text, ok := shared.CloseFromErr(err); ok && code == 4009 {
+			// gateway: uuid already active; retrying will just spam logs.
+			return fmt.Errorf("gateway closed: %d %s", code, text)
+		}
+
+		attempt++
+		wait := reconnectBackoff(rnd, attempt)
+		log.Printf("[https-proxy-agent] disconnected (attempt=%d) err=%v; reconnect in %s", attempt, err, wait)
+		if !sleepWithContext(ctx, wait) {
+			return ctx.Err()
+		}
 	}
-	h := http.Header{}
-	h.Set("X-Token", a.token)
-
-	ws, _, err := dialer.DialContext(ctx, a.registerURL.String(), h)
-	if err != nil {
-		return err
-	}
-	a.ws = ws
-	defer func() { _ = ws.Close() }()
-	if a.httpTransport != nil {
-		defer a.httpTransport.CloseIdleConnections()
-	}
-
-	log.Printf("[https-proxy-agent] connected register_url=%s target=%s", a.registerURL.String(), a.targetBase.String())
-
-	ws.SetPongHandler(func(appData string) error {
-		_ = ws.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
-	})
-	ws.SetReadLimit(a.wsReadLimit)
-	_ = ws.SetReadDeadline(time.Now().Add(90 * time.Second))
-
-	go a.pingLoop(ctx)
-	return a.readLoop(ctx)
 }
 
-func (a *Agent) pingLoop(ctx context.Context) {
+func reconnectBackoff(rnd *rand.Rand, attempt int) time.Duration {
+	// Exponential backoff with jitter, capped.
+	if attempt < 1 {
+		attempt = 1
+	}
+	base := time.Second
+	max := 30 * time.Second
+	d := base << minInt(attempt-1, 5) // 1s,2s,4s,8s,16s,32s
+	if d > max {
+		d = max
+	}
+	// 0.8x - 1.2x jitter.
+	j := 0.8 + rnd.Float64()*0.4
+	return time.Duration(float64(d) * j)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+func (s *connState) run(ctx context.Context) error {
+	s.ws.SetPongHandler(func(appData string) error {
+		_ = s.ws.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	s.ws.SetReadLimit(s.a.wsReadLimit)
+	_ = s.ws.SetReadDeadline(time.Now().Add(90 * time.Second))
+
+	go s.pingLoop(ctx)
+	return s.readLoop(ctx)
+}
+
+func (s *connState) pingLoop(ctx context.Context) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -104,21 +204,21 @@ func (a *Agent) pingLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			a.writeMu.Lock()
-			_ = a.ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
-			a.writeMu.Unlock()
+			s.writeMu.Lock()
+			_ = s.ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
+			s.writeMu.Unlock()
 		}
 	}
 }
 
-func (a *Agent) readLoop(ctx context.Context) error {
+func (s *connState) readLoop(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		mt, msg, err := a.ws.ReadMessage()
+		mt, msg, err := s.ws.ReadMessage()
 		if err != nil {
 			return err
 		}
@@ -129,30 +229,34 @@ func (a *Agent) readLoop(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		s := a.getOrCreateStream(ctx, f.Stream)
-		_ = a.deliverFrame(s, f)
+		st := s.getOrCreateStream(ctx, f.Stream)
+		_ = s.deliverFrame(st, f)
 	}
 }
 
-func (a *Agent) getOrCreateStream(ctx context.Context, id uint32) *stream {
-	a.streamMu.Lock()
-	defer a.streamMu.Unlock()
-	if s := a.streams[id]; s != nil {
-		return s
+func (s *connState) getOrCreateStream(ctx context.Context, id uint32) *stream {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	if st := s.streams[id]; st != nil {
+		return st
 	}
-	s := &stream{id: id, rx: make(chan proto.Frame, 128), closed: make(chan struct{})}
-	a.streams[id] = s
-	go a.handleStream(ctx, s)
-	return s
+	st := &stream{id: id, rx: make(chan proto.Frame, 128), closed: make(chan struct{})}
+	s.streams[id] = st
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.handleStream(ctx, st)
+	}()
+	return st
 }
 
-func (a *Agent) forgetStream(id uint32) {
-	a.streamMu.Lock()
-	s := a.streams[id]
-	delete(a.streams, id)
-	a.streamMu.Unlock()
-	if s != nil {
-		s.close()
+func (s *connState) forgetStream(id uint32) {
+	s.streamMu.Lock()
+	st := s.streams[id]
+	delete(s.streams, id)
+	s.streamMu.Unlock()
+	if st != nil {
+		st.close()
 	}
 }
 
@@ -162,54 +266,54 @@ func (s *stream) close() {
 	})
 }
 
-func (a *Agent) send(t byte, stream uint32, payload []byte) error {
+func (s *connState) send(t byte, stream uint32, payload []byte) error {
 	b := proto.EncodeFrame(t, stream, payload)
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	_ = a.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return a.ws.WriteMessage(websocket.BinaryMessage, b)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	_ = s.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return s.ws.WriteMessage(websocket.BinaryMessage, b)
 }
 
-func (a *Agent) deliverFrame(s *stream, f proto.Frame) bool {
+func (s *connState) deliverFrame(st *stream, f proto.Frame) bool {
 	select {
-	case <-s.closed:
+	case <-st.closed:
 		return false
-	case s.rx <- f:
+	case st.rx <- f:
 		return true
 	default:
-		_ = a.send(proto.TRst, s.id, []byte("stream rx overflow"))
-		a.forgetStream(s.id)
+		_ = s.send(proto.TRst, st.id, []byte("stream rx overflow"))
+		s.forgetStream(st.id)
 		return false
 	}
 }
 
-func (a *Agent) handleStream(ctx context.Context, s *stream) {
-	defer a.forgetStream(s.id)
+func (s *connState) handleStream(ctx context.Context, st *stream) {
+	defer s.forgetStream(st.id)
 
 	var f proto.Frame
 	select {
-	case <-s.closed:
+	case <-st.closed:
 		return
-	case f = <-s.rx:
+	case f = <-st.rx:
 	}
 	if f.Type != proto.TReqStart {
-		_ = a.send(proto.TRst, s.id, []byte("missing req_start"))
+		_ = s.send(proto.TRst, st.id, []byte("missing req_start"))
 		return
 	}
 	var rs proto.ReqStart
 	if err := json.Unmarshal(f.Payload, &rs); err != nil {
-		_ = a.send(proto.TRst, s.id, []byte("bad req_start"))
+		_ = s.send(proto.TRst, st.id, []byte("bad req_start"))
 		return
 	}
 
 	if rs.IsWebSocket {
-		a.handleWebSocket(ctx, s, rs)
+		s.handleWebSocket(ctx, st, rs)
 		return
 	}
-	a.handleHTTP(ctx, s, rs)
+	s.handleHTTP(ctx, st, rs)
 }
 
-func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
+func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStart) {
 	pr, pw := io.Pipe()
 	bodyClosed := make(chan struct{})
 	reqCtx, cancel := context.WithCancel(ctx)
@@ -217,7 +321,7 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 
 	req, err := http.NewRequestWithContext(reqCtx, rs.Method, "", pr)
 	if err != nil {
-		_ = a.send(proto.TRst, s.id, []byte("bad request"))
+		_ = s.send(proto.TRst, st.id, []byte("bad request"))
 		return
 	}
 
@@ -226,12 +330,12 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 		defer func() { _ = pw.Close() }()
 		for {
 			select {
-			case <-s.closed:
+			case <-st.closed:
 				cancel()
 				return
 			case <-reqCtx.Done():
 				return
-			case f := <-s.rx:
+			case f := <-st.rx:
 				switch f.Type {
 				case proto.TReqData:
 					if len(f.Payload) > 0 {
@@ -259,7 +363,7 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 		}
 	}()
 
-	target := shared.JoinURL(a.targetBase, rs.Path)
+	target := shared.JoinURL(s.a.targetBase, rs.Path)
 	target.RawQuery = rs.RawQuery
 
 	req.URL = target
@@ -286,16 +390,16 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 		Got1xxResponse: func(code int, header textproto.MIMEHeader) error {
 			h := http.Header(header)
 			shared.StripConnectionHeaders(h)
-			_ = a.send(proto.TResStart, s.id, proto.MustJSON(proto.ResStart{Status: code, Header: h, Interim: true}))
+			_ = s.send(proto.TResStart, st.id, proto.MustJSON(proto.ResStart{Status: code, Header: h, Interim: true}))
 			return nil
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := s.a.httpClient.Do(req)
 	if err != nil {
-		_ = a.send(proto.TResStart, s.id, proto.MustJSON(proto.ResStart{Status: http.StatusBadGateway}))
-		_ = a.send(proto.TResEnd, s.id, nil)
+		_ = s.send(proto.TResStart, st.id, proto.MustJSON(proto.ResStart{Status: http.StatusBadGateway}))
+		_ = s.send(proto.TResEnd, st.id, nil)
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -307,7 +411,7 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 		Header:      resHeader,
 		TrailerKeys: shared.HeaderKeys(resp.Trailer),
 	}
-	if err := a.send(proto.TResStart, s.id, proto.MustJSON(resStart)); err != nil {
+	if err := s.send(proto.TResStart, st.id, proto.MustJSON(resStart)); err != nil {
 		cancel()
 		return
 	}
@@ -316,7 +420,7 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			if err2 := a.send(proto.TResData, s.id, buf[:n]); err2 != nil {
+			if err2 := s.send(proto.TResData, st.id, buf[:n]); err2 != nil {
 				cancel()
 				return
 			}
@@ -327,18 +431,18 @@ func (a *Agent) handleHTTP(ctx context.Context, s *stream, rs proto.ReqStart) {
 	}
 
 	if len(resp.Trailer) > 0 {
-		if err := a.send(proto.TResTrailer, s.id, proto.MustJSON(map[string][]string(resp.Trailer))); err != nil {
+		if err := s.send(proto.TResTrailer, st.id, proto.MustJSON(map[string][]string(resp.Trailer))); err != nil {
 			cancel()
 			return
 		}
 	}
-	_ = a.send(proto.TResEnd, s.id, nil)
+	_ = s.send(proto.TResEnd, st.id, nil)
 
 	<-bodyClosed
 }
 
-func (a *Agent) handleWebSocket(ctx context.Context, s *stream, rs proto.ReqStart) {
-	targetHTTP := shared.JoinURL(a.targetBase, rs.Path)
+func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.ReqStart) {
+	targetHTTP := shared.JoinURL(s.a.targetBase, rs.Path)
 	targetHTTP.RawQuery = rs.RawQuery
 	targetWS := shared.ToWebSocketURL(targetHTTP)
 
@@ -351,22 +455,22 @@ func (a *Agent) handleWebSocket(ctx context.Context, s *stream, rs proto.ReqStar
 
 	wsUp, _, err := dialer.DialContext(ctx, targetWS.String(), h)
 	if err != nil {
-		_ = a.send(proto.TWsOpenErr, s.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
 		return
 	}
-	wsUp.SetReadLimit(a.wsReadLimit)
+	wsUp.SetReadLimit(s.a.wsReadLimit)
 	defer func() { _ = wsUp.Close() }()
 
 	sub := wsUp.Subprotocol()
-	if err := a.send(proto.TWsOpenOK, s.id, proto.MustJSON(proto.WsOpenOK{Subprotocol: sub})); err != nil {
+	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{Subprotocol: sub})); err != nil {
 		return
 	}
 
 	var closeOnce sync.Once
 	sendCloseToGateway := func(code int, reason string) {
 		closeOnce.Do(func() {
-			_ = a.send(proto.TWsClose, s.id, proto.MustJSON(proto.WsClose{Code: code, Reason: reason}))
-			s.close()
+			_ = s.send(proto.TWsClose, st.id, proto.MustJSON(proto.WsClose{Code: code, Reason: reason}))
+			st.close()
 		})
 	}
 
@@ -385,7 +489,7 @@ func (a *Agent) handleWebSocket(ctx context.Context, s *stream, rs proto.ReqStar
 				continue
 			}
 			payload := append([]byte{byte(mt)}, data...)
-			if err := a.send(proto.TWsA2C, s.id, payload); err != nil {
+			if err := s.send(proto.TWsA2C, st.id, payload); err != nil {
 				return
 			}
 		}
@@ -393,11 +497,11 @@ func (a *Agent) handleWebSocket(ctx context.Context, s *stream, rs proto.ReqStar
 
 	for {
 		select {
-		case <-s.closed:
+		case <-st.closed:
 			return
 		case <-ctx.Done():
 			return
-		case f := <-s.rx:
+		case f := <-st.rx:
 			switch f.Type {
 			case proto.TWsC2A:
 				if len(f.Payload) == 0 {
@@ -424,5 +528,20 @@ func (a *Agent) handleWebSocket(ctx context.Context, s *stream, rs proto.ReqStar
 				return
 			}
 		}
+	}
+}
+
+func (s *connState) closeAllStreams() {
+	s.streamMu.Lock()
+	list := make([]*stream, 0, len(s.streams))
+	for _, st := range s.streams {
+		list = append(list, st)
+	}
+	// Clear map to avoid delivering frames after teardown.
+	s.streams = make(map[uint32]*stream)
+	s.streamMu.Unlock()
+
+	for _, st := range list {
+		st.close()
 	}
 }

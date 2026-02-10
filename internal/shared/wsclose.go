@@ -1,6 +1,10 @@
 package shared
 
-import "github.com/gorilla/websocket"
+import (
+	"errors"
+
+	"github.com/gorilla/websocket"
+)
 
 const WSReadLimitBytes int64 = 10 << 20
 
@@ -8,7 +12,8 @@ func CloseFromErr(err error) (int, string, bool) {
 	if err == nil {
 		return 0, "", false
 	}
-	if ce, ok := err.(*websocket.CloseError); ok {
+	var ce *websocket.CloseError
+	if errors.As(err, &ce) {
 		return ce.Code, ce.Text, true
 	}
 	return 0, "", false
