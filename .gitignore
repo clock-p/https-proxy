@@ -3,4 +3,5 @@ dist/
 *.tar.gz
 *.sha256
 *.tmp
-
+config/*.env
+!config/*.example.env

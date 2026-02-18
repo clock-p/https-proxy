@@ -27,9 +27,9 @@ HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:18080
 
 ```bash
 go run ./cmd/agent \
-  --register-url ws://127.0.0.1:18080/register?uuid=u1 \
-  --token <TOKEN> \
-  --target http://127.0.0.1:18081/aaa
+  -x-token <TOKEN> \
+  -R http://127.0.0.1:18081/aaa \
+  u1@127.0.0.1:18080
 ```
 
 4) 用 mock client 验证（HTTP/stream/ws/Trailers/1xx）：
@@ -78,14 +78,53 @@ HTTPS_PROXY_STREAM_IDLE_TIMEOUT=12h \
 go run ./cmd/gateway --listen 127.0.0.1:18080
 ```
 
-Agent 启动（每个 uuid 一条连接）：
+Agent 采用 SSH 风格：
 
 ```bash
-go run ./cmd/agent \
-  --register-url ws://127.0.0.1:18080/register?uuid=<UUID> \
-  --token <TOKEN> \
-  --target http://127.0.0.1:<app_port>/<base_path>
+agent -R <target_url> <uuid>@<register_host>
+agent -L [bind_addr:]<port> <upstream_url>
 ```
+
+注意：`agent` 参数遵循 Go flag 规则，选项请放在位置参数之前。
+
+### 1) `-R`：注册隧道（本地服务暴露到受管域名）
+
+```bash
+agent \
+  -i /path/to/token.txt \
+  -x-token <legacy_x_token_optional> \
+  -R http://127.0.0.1:<app_port>/<base_path> \
+  <uuid>@register-https-proxy.example.com
+```
+
+效果：
+
+- agent 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
+- client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
+
+### 2) `-L`：本地反向代理（受管域名回流到本地端口）
+
+```bash
+agent \
+  -i /path/to/token.txt \
+  -L 127.0.0.1:28789 \
+  https://<uuid>.example.com/
+```
+
+效果：
+
+- 本地 worker 只连 `http://127.0.0.1:28789`。
+- agent 会把 HTTP/WS 转发到受管 HTTPS 域名。
+- 会自动注入 `Authorization: Bearer <token>`（来自 `-i` / `--token` / 环境变量）。
+
+### 3) 认证参数
+
+- `-i <file>`：Bearer token 文件（ssh 风格 identity file）
+- `--token <token>`：Bearer token 直传（调试）
+- `-x-token <token>`：仅 `-R` 模式使用（兼容旧网关 X-Token）
+- 环境变量兜底：
+  - `CLOCK_P_HTTPS_PROXY_TOKEN`
+  - `CLOCK_P_HTTPS_PROXY_TOKEN_PATH`
 
 版本信息：
 
@@ -101,6 +140,11 @@ go run ./cmd/agent \
 - `HTTPS_PROXY_MAX_BODY_BYTES`：单请求 body 上限（默认 512MB）
 - `HTTPS_PROXY_MAX_HEADER_BYTES`：请求 header 上限（默认 1MB）
 - `HTTPS_PROXY_STREAM_IDLE_TIMEOUT`：响应流空闲超时（默认 5m，当前建议 12h）
+- `HTTPS_PROXY_HEARTBEAT_TIMEOUT`：Agent 心跳超时（默认 60s，设为 `0` 关闭心跳监测）
+- `HTTPS_PROXY_FIRST_RESPONSE_TIMEOUT`：等待首包超时（默认 30s，设为 `0` 关闭）
+- `HTTPS_PROXY_WS_OPEN_TIMEOUT`：等待 WS 握手超时（默认 10s，设为 `0` 关闭）
+- `HTTPS_PROXY_HTTP_READ_HEADER_TIMEOUT`：网关 HTTP 读请求头超时（默认 5s，设为 `0` 关闭）
+- `HTTPS_PROXY_HTTP_IDLE_TIMEOUT`：网关 HTTP KeepAlive 空闲超时（默认 120s，设为 `0` 关闭）
 - WebSocket 单条消息读取上限：10MB（gateway/client、gateway/agent、agent/upstream 统一）
 
 ## Phase5：code-server 轻量验证（本地）
@@ -127,9 +171,9 @@ HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:19080
 
 ```bash
 go run ./cmd/agent \
-  --register-url ws://127.0.0.1:19080/register?uuid=cs1 \
-  --token <TOKEN> \
-  --target http://127.0.0.1:19090/
+  -x-token <TOKEN> \
+  -R http://127.0.0.1:19090/ \
+  cs1@127.0.0.1:19080
 ```
 
 3) 轻量验证（页面与静态资源）：
