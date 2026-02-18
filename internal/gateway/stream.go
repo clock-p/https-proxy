@@ -36,9 +36,6 @@ func (s *stream) deliver(f proto.Frame) {
 	select {
 	case s.rx <- f:
 	case <-s.closedCh:
-	default:
-		_ = s.send(proto.TRst, []byte("stream rx overflow"))
-		s.closeWithErr(errors.New("stream rx overflow"))
 	}
 }
 

@@ -22,10 +22,11 @@ import (
 )
 
 type Agent struct {
-	registerURL *url.URL
-	token       string
-	targetBase  *url.URL
-	wsReadLimit int64
+	registerURL         *url.URL
+	registerXToken      string
+	registerBearerToken string
+	targetBase          *url.URL
+	wsReadLimit         int64
 
 	httpClient    *http.Client
 	httpTransport *http.Transport
@@ -49,7 +50,7 @@ type stream struct {
 	closeOnce sync.Once
 }
 
-func New(registerURL *url.URL, token string, targetBase *url.URL) *Agent {
+func New(registerURL *url.URL, registerXToken string, registerBearerToken string, targetBase *url.URL) *Agent {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -61,11 +62,12 @@ func New(registerURL *url.URL, token string, targetBase *url.URL) *Agent {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return &Agent{
-		registerURL:   registerURL,
-		token:         token,
-		targetBase:    targetBase,
-		wsReadLimit:   shared.WSReadLimitBytes,
-		httpTransport: transport,
+		registerURL:         registerURL,
+		registerXToken:      registerXToken,
+		registerBearerToken: registerBearerToken,
+		targetBase:          targetBase,
+		wsReadLimit:         shared.WSReadLimitBytes,
+		httpTransport:       transport,
 		httpClient: &http.Client{
 			Transport: transport,
 		},
@@ -83,7 +85,12 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 		h := http.Header{}
-		h.Set("X-Token", a.token)
+		if a.registerXToken != "" {
+			h.Set("X-Token", a.registerXToken)
+		}
+		if a.registerBearerToken != "" {
+			h.Set("Authorization", "Bearer "+a.registerBearerToken)
+		}
 
 		ws, _, err := dialer.DialContext(ctx, a.registerURL.String(), h)
 		if err != nil {

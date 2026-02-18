@@ -29,6 +29,9 @@ type Server struct {
 	maxStreamsPerAgent int
 	maxBodyBytes       int64
 	streamIdleTimeout  time.Duration
+	heartbeatTimeout   time.Duration
+	firstRespTimeout   time.Duration
+	wsOpenTimeout      time.Duration
 	wsReadLimitBytes   int64
 	nextReqID          atomic.Uint64
 }
@@ -55,6 +58,9 @@ func NewServerFromEnv() *Server {
 	maxStreams := envInt("HTTPS_PROXY_MAX_STREAMS_PER_AGENT", 0)
 	maxBody := envInt64("HTTPS_PROXY_MAX_BODY_BYTES", 512<<20)
 	streamIdle := envDuration("HTTPS_PROXY_STREAM_IDLE_TIMEOUT", 5*time.Minute)
+	heartbeatTimeout := envDuration("HTTPS_PROXY_HEARTBEAT_TIMEOUT", 60*time.Second)
+	firstRespTimeout := envDuration("HTTPS_PROXY_FIRST_RESPONSE_TIMEOUT", 30*time.Second)
+	wsOpenTimeout := envDuration("HTTPS_PROXY_WS_OPEN_TIMEOUT", 10*time.Second)
 
 	return &Server{
 		agentTokenSet: set,
@@ -67,6 +73,9 @@ func NewServerFromEnv() *Server {
 		maxStreamsPerAgent: maxStreams,
 		maxBodyBytes:       maxBody,
 		streamIdleTimeout:  streamIdle,
+		heartbeatTimeout:   heartbeatTimeout,
+		firstRespTimeout:   firstRespTimeout,
+		wsOpenTimeout:      wsOpenTimeout,
 		wsReadLimitBytes:   shared.WSReadLimitBytes,
 	}
 }
@@ -186,32 +195,33 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.mu.unlock()
 	}()
 
-	// 心跳：超过 60s 没收到 ping 就踢掉
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		defer func() {
-			s.mu.lock()
-			if s.agentByUUID[uuid] == c {
-				delete(s.agentByUUID, uuid)
-			}
-			s.mu.unlock()
-			_ = ws.Close()
-			c.closeWithErr(errors.New("heartbeat timeout"))
-		}()
+	if s.heartbeatTimeout > 0 {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			defer func() {
+				s.mu.lock()
+				if s.agentByUUID[uuid] == c {
+					delete(s.agentByUUID, uuid)
+				}
+				s.mu.unlock()
+				_ = ws.Close()
+				c.closeWithErr(errors.New("heartbeat timeout"))
+			}()
 
-		for {
-			select {
-			case <-c.closedCh:
-				return
-			case <-ticker.C:
-				last := time.Unix(c.lastPingUnix.Load(), 0)
-				if time.Since(last) > 60*time.Second {
+			for {
+				select {
+				case <-c.closedCh:
 					return
+				case <-ticker.C:
+					last := time.Unix(c.lastPingUnix.Load(), 0)
+					if time.Since(last) > s.heartbeatTimeout {
+						return
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 func (s *Server) getAgent(uuid string) *agentConn {
@@ -277,6 +287,7 @@ func (s *Server) handleClientHTTP(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	headers := r.Header.Clone()
+	stripForwardingIPHeaders(headers)
 	trailerKeys := shared.TrailerKeysFromHeader(headers)
 	if len(trailerKeys) == 0 && len(r.Trailer) > 0 {
 		trailerKeys = shared.HeaderKeys(r.Trailer)
@@ -340,7 +351,7 @@ func (s *Server) handleClientHTTP(w http.ResponseWriter, r *http.Request, agent 
 	// 响应回传（支持 1xx）
 	var resStart proto.ResStart
 	for {
-		f, err := st.recv(30 * time.Second)
+		f, err := st.recv(s.firstRespTimeout)
 		if err != nil || f.Type != proto.TResStart {
 			_ = st.send(proto.TRst, []byte("gateway timeout"))
 			http.Error(w, "agent no response", http.StatusBadGateway)
@@ -416,12 +427,15 @@ func (s *Server) handleClientWebSocket(w http.ResponseWriter, r *http.Request, a
 	}
 	defer st.closeWithErr(nil)
 
+	wsHeaders := r.Header.Clone()
+	stripForwardingIPHeaders(wsHeaders)
+
 	reqStart := proto.ReqStart{
 		Method:      r.Method,
 		Path:        suffixPath,
 		RawQuery:    r.URL.RawQuery,
 		Host:        r.Host,
-		Header:      r.Header.Clone(),
+		Header:      wsHeaders,
 		IsWebSocket: true,
 	}
 
@@ -430,7 +444,7 @@ func (s *Server) handleClientWebSocket(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
-	f, err := st.recv(10 * time.Second)
+	f, err := st.recv(s.wsOpenTimeout)
 	if err != nil {
 		_ = st.send(proto.TRst, []byte("agent ws timeout"))
 		http.Error(w, "agent ws timeout", http.StatusBadGateway)
@@ -586,6 +600,11 @@ func setTrailerKeys(h http.Header, keys []string) {
 		return
 	}
 	h.Set("Trailer", strings.Join(uniq, ", "))
+}
+
+func stripForwardingIPHeaders(h http.Header) {
+	h.Del("X-Forwarded-For")
+	h.Del("Forwarded")
 }
 
 type logResponseWriter struct {
