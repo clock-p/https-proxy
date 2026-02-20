@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/clock-p/https-proxy/internal/proto"
+	"github.com/clock-p/clockbridge/internal/proto"
 )
 
 var ErrStreamTimeout = errors.New("stream recv timeout")

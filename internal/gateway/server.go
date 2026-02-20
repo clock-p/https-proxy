@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/clock-p/https-proxy/internal/proto"
-	"github.com/clock-p/https-proxy/internal/shared"
+	"github.com/clock-p/clockbridge/internal/proto"
+	"github.com/clock-p/clockbridge/internal/shared"
 	"github.com/gorilla/websocket"
 )
 
@@ -635,13 +635,13 @@ func (w *logResponseWriter) statusOr(def int) int {
 }
 
 func logAccess(id uint64, uuid, method, path string, status int, bytes int64, start time.Time) {
-	log.Printf("[https-proxy-gateway] id=%d uuid=%s method=%s path=%s status=%d bytes=%d dur=%s", id, uuid, method, path, status, bytes, time.Since(start))
+	log.Printf("[clockbridge-gateway] id=%d uuid=%s method=%s path=%s status=%d bytes=%d dur=%s", id, uuid, method, path, status, bytes, time.Since(start))
 }
 
 func logWSOpen(id uint64, uuid, path string) {
-	log.Printf("[https-proxy-gateway] id=%d uuid=%s ws=open path=%s", id, uuid, path)
+	log.Printf("[clockbridge-gateway] id=%d uuid=%s ws=open path=%s", id, uuid, path)
 }
 
 func logWSClose(id uint64, uuid, path string, start time.Time) {
-	log.Printf("[https-proxy-gateway] id=%d uuid=%s ws=close path=%s dur=%s", id, uuid, path, time.Since(start))
+	log.Printf("[clockbridge-gateway] id=%d uuid=%s ws=close path=%s dur=%s", id, uuid, path, time.Since(start))
 }

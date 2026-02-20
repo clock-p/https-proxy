@@ -13,8 +13,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/clock-p/https-proxy/internal/agent"
-	"github.com/clock-p/https-proxy/internal/reverseproxy"
+	"github.com/clock-p/clockbridge/internal/agent"
+	"github.com/clock-p/clockbridge/internal/reverseproxy"
 )
 
 var version = "dev"
@@ -72,12 +72,12 @@ func main() {
 func usage() {
 	out := flag.CommandLine.Output()
 	fmt.Fprintln(out, "Usage:")
-	fmt.Fprintln(out, "  agent -R <target_url> <uuid>@<register_host>")
-	fmt.Fprintln(out, "  agent -L [bind_addr:]<port> <upstream_url>")
+	fmt.Fprintln(out, "  clockbridge-cli -R <target_url> <uuid>@<register_host>")
+	fmt.Fprintln(out, "  clockbridge-cli -L [bind_addr:]<port> <upstream_url>")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
-	fmt.Fprintln(out, "  agent -i /path/to/token.txt -x-token <TOKEN> -R http://127.0.0.1:18789/ demo@register-https-proxy.example.com")
-	fmt.Fprintln(out, "  agent -i /path/to/token.txt -L 127.0.0.1:28789 https://demo.example.com/")
+	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -x-token <TOKEN> -R http://127.0.0.1:18789/ demo@register-https-proxy.example.com")
+	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -L 127.0.0.1:28789 https://demo.example.com/")
 	fmt.Fprintln(out, "")
 	flag.PrintDefaults()
 }
@@ -118,12 +118,12 @@ func runLocalForward(
 	}
 
 	if strings.TrimSpace(xToken) != "" {
-		log.Printf("[https-proxy-reverse] warning: -x-token is ignored in -L mode")
+		log.Printf("[clockbridge-reverse] warning: -x-token is ignored in -L mode")
 	}
 	if bearerToken == "" {
-		log.Printf("[https-proxy-reverse] warning: no Authorization bearer configured")
+		log.Printf("[clockbridge-reverse] warning: no Authorization bearer configured")
 	} else {
-		log.Printf("[https-proxy-reverse] upstream Authorization bearer: enabled source=%s", bearerSource)
+		log.Printf("[clockbridge-reverse] upstream Authorization bearer: enabled source=%s", bearerSource)
 	}
 
 	rp := reverseproxy.New(listenAddr, upstream, bearerToken)
@@ -158,13 +158,13 @@ func runRemoteForward(
 	}
 
 	if strings.TrimSpace(xToken) == "" && bearerToken == "" {
-		log.Printf("[https-proxy-agent] warning: no auth headers configured (X-Token/Authorization)")
+		log.Printf("[clockbridge-cli] warning: no auth headers configured (X-Token/Authorization)")
 	} else {
 		if strings.TrimSpace(xToken) != "" {
-			log.Printf("[https-proxy-agent] register X-Token: enabled")
+			log.Printf("[clockbridge-cli] register X-Token: enabled")
 		}
 		if bearerToken != "" {
-			log.Printf("[https-proxy-agent] register Authorization bearer: enabled source=%s", bearerSource)
+			log.Printf("[clockbridge-cli] register Authorization bearer: enabled source=%s", bearerSource)
 		}
 	}
 
@@ -278,18 +278,18 @@ func resolveBearerToken(tokenFlag, identityFile string) (token string, source st
 		return value, "flag:-i", nil
 	}
 
-	tokenFromEnv := strings.TrimSpace(os.Getenv("CLOCK_P_HTTPS_PROXY_TOKEN"))
+	tokenFromEnv := strings.TrimSpace(os.Getenv("CLOCKBRIDGE_HTTPS_PROXY_TOKEN"))
 	if tokenFromEnv != "" {
-		return tokenFromEnv, "env:CLOCK_P_HTTPS_PROXY_TOKEN", nil
+		return tokenFromEnv, "env:CLOCKBRIDGE_HTTPS_PROXY_TOKEN", nil
 	}
 
-	tokenPathEnv := strings.TrimSpace(os.Getenv("CLOCK_P_HTTPS_PROXY_TOKEN_PATH"))
+	tokenPathEnv := strings.TrimSpace(os.Getenv("CLOCKBRIDGE_HTTPS_PROXY_TOKEN_PATH"))
 	if tokenPathEnv != "" {
 		value, readErr := readTokenFromFile(tokenPathEnv)
 		if readErr != nil {
 			return "", "", readErr
 		}
-		return value, "env:CLOCK_P_HTTPS_PROXY_TOKEN_PATH", nil
+		return value, "env:CLOCKBRIDGE_HTTPS_PROXY_TOKEN_PATH", nil
 	}
 
 	return "", "none", nil

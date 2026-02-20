@@ -21,15 +21,15 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/https-proxy_gateway_${{ github.ref_name }}_linux_amd64 ./cmd/gateway
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/https-proxy_agent_${{ github.ref_name }}_linux_amd64 ./cmd/agent
-          cp README.md dist/https-proxy_README_${{ github.ref_name }}.md
-          sha256sum dist/https-proxy_gateway_${{ github.ref_name }}_linux_amd64 dist/https-proxy_agent_${{ github.ref_name }}_linux_amd64 dist/https-proxy_README_${{ github.ref_name }}.md > dist/https-proxy_${{ github.ref_name }}_SHA256SUMS
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/clockbridge-gateway_${{ github.ref_name }}_linux_amd64 ./cmd/gateway
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/clockbridge-cli_${{ github.ref_name }}_linux_amd64 ./cmd/clockbridge-cli
+          cp README.md dist/clockbridge_README_${{ github.ref_name }}.md
+          sha256sum dist/clockbridge-gateway_${{ github.ref_name }}_linux_amd64 dist/clockbridge-cli_${{ github.ref_name }}_linux_amd64 dist/clockbridge_README_${{ github.ref_name }}.md > dist/clockbridge_${{ github.ref_name }}_SHA256SUMS
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/https-proxy_gateway_${{ github.ref_name }}_linux_amd64
-            dist/https-proxy_agent_${{ github.ref_name }}_linux_amd64
-            dist/https-proxy_README_${{ github.ref_name }}.md
-            dist/https-proxy_${{ github.ref_name }}_SHA256SUMS
+            dist/clockbridge-gateway_${{ github.ref_name }}_linux_amd64
+            dist/clockbridge-cli_${{ github.ref_name }}_linux_amd64
+            dist/clockbridge_README_${{ github.ref_name }}.md
+            dist/clockbridge_${{ github.ref_name }}_SHA256SUMS

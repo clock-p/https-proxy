@@ -1,4 +1,4 @@
-module github.com/clock-p/https-proxy
+module github.com/clock-p/clockbridge
 
 go 1.22
 

@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/clock-p/https-proxy/internal/proto"
-	"github.com/clock-p/https-proxy/internal/shared"
+	"github.com/clock-p/clockbridge/internal/proto"
+	"github.com/clock-p/clockbridge/internal/shared"
 	"github.com/gorilla/websocket"
 )
 
@@ -96,7 +96,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err != nil {
 			attempt++
 			wait := reconnectBackoff(rnd, attempt)
-			log.Printf("[https-proxy-agent] dial failed (attempt=%d) register_url=%s err=%v; retry in %s", attempt, a.registerURL.String(), err, wait)
+			log.Printf("[clockbridge-cli] dial failed (attempt=%d) register_url=%s err=%v; retry in %s", attempt, a.registerURL.String(), err, wait)
 			if !sleepWithContext(ctx, wait) {
 				return ctx.Err()
 			}
@@ -112,7 +112,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			streams: make(map[uint32]*stream),
 		}
 
-		log.Printf("[https-proxy-agent] connected register_url=%s target=%s", a.registerURL.String(), a.targetBase.String())
+		log.Printf("[clockbridge-cli] connected register_url=%s target=%s", a.registerURL.String(), a.targetBase.String())
 
 		// Ensure ctrl+C (ctx cancellation) unblocks ReadMessage promptly.
 		connCtx, cancel := context.WithCancel(ctx)
@@ -150,7 +150,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		attempt++
 		wait := reconnectBackoff(rnd, attempt)
-		log.Printf("[https-proxy-agent] disconnected (attempt=%d) err=%v; reconnect in %s", attempt, err, wait)
+		log.Printf("[clockbridge-cli] disconnected (attempt=%d) err=%v; reconnect in %s", attempt, err, wait)
 		if !sleepWithContext(ctx, wait) {
 			return ctx.Err()
 		}

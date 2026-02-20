@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/clock-p/https-proxy/internal/gateway"
+	"github.com/clock-p/clockbridge/internal/gateway"
 )
 
 var version = "dev"
@@ -29,7 +29,7 @@ func main() {
 	maxHeaderBytes := gateway.MaxHeaderBytesFromEnv()
 	readHeaderTimeout := durationFromEnv("HTTPS_PROXY_HTTP_READ_HEADER_TIMEOUT", 5*time.Second)
 	idleTimeout := durationFromEnv("HTTPS_PROXY_HTTP_IDLE_TIMEOUT", 120*time.Second)
-	log.Printf("[https-proxy-gateway] listen=%s", *listen)
+	log.Printf("[clockbridge-gateway] listen=%s", *listen)
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           s,

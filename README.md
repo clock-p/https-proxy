@@ -1,4 +1,4 @@
-# https-proxy
+# clockbridge
 
 目标：在 **1 个域名 + 只对外 443** 的约束下，把内网 App（比如 code-server）通过 HTTPS 代理到公网。
 
@@ -23,10 +23,10 @@ go run ./cmd/mockapp --listen 127.0.0.1:18081 --base /aaa
 HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:18080
 ```
 
-3) 启动 agent（注册到 gateway，并转发到 mock app）：
+3) 启动 clockbridge-cli（注册到 gateway，并转发到 mock app）：
 
 ```bash
-go run ./cmd/agent \
+go run ./cmd/clockbridge-cli \
   -x-token <TOKEN> \
   -R http://127.0.0.1:18081/aaa \
   u1@127.0.0.1:18080
@@ -68,7 +68,7 @@ location ^~ /https-proxy/ {
 }
 ```
 
-## 运行手册（Gateway/Agent）
+## 运行手册（Gateway/CLI）
 
 Gateway 启动：
 
@@ -78,19 +78,19 @@ HTTPS_PROXY_STREAM_IDLE_TIMEOUT=12h \
 go run ./cmd/gateway --listen 127.0.0.1:18080
 ```
 
-Agent 采用 SSH 风格：
+clockbridge-cli 采用 SSH 风格：
 
 ```bash
-agent -R <target_url> <uuid>@<register_host>
-agent -L [bind_addr:]<port> <upstream_url>
+clockbridge-cli -R <target_url> <uuid>@<register_host>
+clockbridge-cli -L [bind_addr:]<port> <upstream_url>
 ```
 
-注意：`agent` 参数遵循 Go flag 规则，选项请放在位置参数之前。
+注意：`clockbridge-cli` 参数遵循 Go flag 规则，选项请放在位置参数之前。
 
 ### 1) `-R`：注册隧道（本地服务暴露到受管域名）
 
 ```bash
-agent \
+clockbridge-cli \
   -i /path/to/token.txt \
   -x-token <legacy_x_token_optional> \
   -R http://127.0.0.1:<app_port>/<base_path> \
@@ -99,13 +99,13 @@ agent \
 
 效果：
 
-- agent 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
+- clockbridge-cli 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
 - client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
 
 ### 2) `-L`：本地反向代理（受管域名回流到本地端口）
 
 ```bash
-agent \
+clockbridge-cli \
   -i /path/to/token.txt \
   -L 127.0.0.1:28789 \
   https://<uuid>.example.com/
@@ -114,7 +114,7 @@ agent \
 效果：
 
 - 本地 worker 只连 `http://127.0.0.1:28789`。
-- agent 会把 HTTP/WS 转发到受管 HTTPS 域名。
+- clockbridge-cli 会把 HTTP/WS 转发到受管 HTTPS 域名。
 - 会自动注入 `Authorization: Bearer <token>`（来自 `-i` / `--token` / 环境变量）。
 
 ### 3) 认证参数
@@ -123,14 +123,14 @@ agent \
 - `--token <token>`：Bearer token 直传（调试）
 - `-x-token <token>`：仅 `-R` 模式使用（兼容旧网关 X-Token）
 - 环境变量兜底：
-  - `CLOCK_P_HTTPS_PROXY_TOKEN`
-  - `CLOCK_P_HTTPS_PROXY_TOKEN_PATH`
+  - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN`
+  - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN_PATH`
 
 版本信息：
 
 ```bash
-./gateway --version
-./agent --version
+./clockbridge-gateway --version
+./clockbridge-cli --version
 ```
 
 环境变量（Gateway）：
@@ -145,7 +145,7 @@ agent \
 - `HTTPS_PROXY_WS_OPEN_TIMEOUT`：等待 WS 握手超时（默认 10s，设为 `0` 关闭）
 - `HTTPS_PROXY_HTTP_READ_HEADER_TIMEOUT`：网关 HTTP 读请求头超时（默认 5s，设为 `0` 关闭）
 - `HTTPS_PROXY_HTTP_IDLE_TIMEOUT`：网关 HTTP KeepAlive 空闲超时（默认 120s，设为 `0` 关闭）
-- WebSocket 单条消息读取上限：10MB（gateway/client、gateway/agent、agent/upstream 统一）
+- WebSocket 单条消息读取上限：10MB（gateway/client、gateway/cli、cli/upstream 统一）
 
 ## Phase5：code-server 轻量验证（本地）
 
@@ -163,14 +163,14 @@ code-server \
   --extensions-dir /tmp/https-proxy-cs-ext
 ```
 
-2) 启动 gateway + agent（uuid=cs1）：
+2) 启动 gateway + clockbridge-cli（uuid=cs1）：
 
 ```bash
 HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:19080
 ```
 
 ```bash
-go run ./cmd/agent \
+go run ./cmd/clockbridge-cli \
   -x-token <TOKEN> \
   -R http://127.0.0.1:19090/ \
   cs1@127.0.0.1:19080

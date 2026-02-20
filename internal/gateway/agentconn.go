@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/clock-p/https-proxy/internal/proto"
+	"github.com/clock-p/clockbridge/internal/proto"
 	"github.com/gorilla/websocket"
 )
 

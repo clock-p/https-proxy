@@ -3,26 +3,26 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Install https-proxy (gateway + agent) from a GitHub Release.
+Install clockbridge (gateway + cli) from a GitHub Release.
 
 Usage:
   install_from_github_release.sh --repo <owner/name> [--version <vX.Y.Z|latest>] [--install-dir <dir>]
 
 Examples:
-  sudo ./scripts/install_from_github_release.sh --repo yourorg/https-proxy --version latest
-  sudo ./scripts/install_from_github_release.sh --repo yourorg/https-proxy --version v0.1.0 --install-dir /opt/https-proxy/bin
+  sudo ./scripts/install_from_github_release.sh --repo yourorg/clockbridge --version latest
+  sudo ./scripts/install_from_github_release.sh --repo yourorg/clockbridge --version v0.1.0 --install-dir /opt/clockbridge/bin
 
 Notes:
   - Installs linux/amd64 artifacts:
-      - https-proxy_gateway_<tag>_linux_amd64
-      - https-proxy_agent_<tag>_linux_amd64
-  - Verifies sha256 if https-proxy_<tag>_SHA256SUMS exists in the release.
+      - clockbridge-gateway_<tag>_linux_amd64
+      - clockbridge-cli_<tag>_linux_amd64
+  - Verifies sha256 if clockbridge_<tag>_SHA256SUMS exists in the release.
 EOF
 }
 
 REPO=""
 VERSION="latest"
-INSTALL_DIR="/opt/https-proxy/bin"
+INSTALL_DIR="/opt/clockbridge/bin"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,9 +92,9 @@ if [[ -z "${tag}" ]]; then
   exit 1
 fi
 
-asset_gateway="https-proxy_gateway_${tag}_linux_amd64"
-asset_agent="https-proxy_agent_${tag}_linux_amd64"
-asset_sha="https-proxy_${tag}_SHA256SUMS"
+asset_gateway="clockbridge-gateway_${tag}_linux_amd64"
+asset_agent="clockbridge-cli_${tag}_linux_amd64"
+asset_sha="clockbridge_${tag}_SHA256SUMS"
 
 gateway_url="$(
   python3 - <<'PY'
@@ -172,9 +172,9 @@ else
 fi
 
 install -d -m 0755 "${INSTALL_DIR}"
-install -m 0755 "${gateway_path}" "${INSTALL_DIR}/gateway"
-install -m 0755 "${agent_path}" "${INSTALL_DIR}/agent"
+install -m 0755 "${gateway_path}" "${INSTALL_DIR}/clockbridge-gateway"
+install -m 0755 "${agent_path}" "${INSTALL_DIR}/clockbridge-cli"
 
 echo "[OK] installed:"
-echo "  ${INSTALL_DIR}/gateway (${tag})"
-echo "  ${INSTALL_DIR}/agent (${tag})"
+echo "  ${INSTALL_DIR}/clockbridge-gateway (${tag})"
+echo "  ${INSTALL_DIR}/clockbridge-cli (${tag})"

@@ -52,7 +52,7 @@ func (s *Server) Run(ctx context.Context) error {
 	proxy.Transport = s.transport
 	proxy.FlushInterval = -1
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
-		log.Printf("[https-proxy-reverse] upstream error method=%s path=%s err=%v", req.Method, req.URL.String(), err)
+		log.Printf("[clockbridge-reverse] upstream error method=%s path=%s err=%v", req.Method, req.URL.String(), err)
 		http.Error(rw, "bad gateway", http.StatusBadGateway)
 	}
 
@@ -64,7 +64,7 @@ func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 
 	go func() {
-		log.Printf("[https-proxy-reverse] listening=%s upstream=%s", s.listenAddr, s.upstreamURL.String())
+		log.Printf("[clockbridge-reverse] listening=%s upstream=%s", s.listenAddr, s.upstreamURL.String())
 		errCh <- server.ListenAndServe()
 	}()
 
