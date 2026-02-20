@@ -13,6 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Delete legacy release assets
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          api="https://api.github.com/repos/${{ github.repository }}"
+          release_json="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "${api}/releases/tags/${tag}" || true)"
+          release_id="$(jq -r '.id // empty' <<<"${release_json}")"
+          if [[ -z "${release_id}" ]]; then
+            exit 0
+          fi
+          jq -r '.assets[] | select(.name | startswith("https-proxy_")) | .id' <<<"${release_json}" | while read -r asset_id; do
+            curl -fsSL -X DELETE -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" "${api}/releases/assets/${asset_id}" >/dev/null
+          done
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
