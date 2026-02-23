@@ -29,7 +29,7 @@ HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:18080
 go run ./cmd/clockbridge-cli \
   -x-token <TOKEN> \
   -R http://127.0.0.1:18081/aaa \
-  u1@127.0.0.1:18080
+  u1@http://127.0.0.1:18080
 ```
 
 4) 用 mock client 验证（HTTP/stream/ws/Trailers/1xx）：
@@ -104,6 +104,20 @@ clockbridge-cli \
 - client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
 - 若设置 `--register-ip`，TCP 实际连接会改为该 IP（可选 `ip:port`），但请求 Host 与 TLS SNI 仍使用 `<register_host>`。
 
+`<register_host>` 协议规则：
+
+- 未带 scheme：默认按 `https` 处理（即注册用 `wss`）
+- `http://...`：注册用 `ws`
+- `https://...`：注册用 `wss`
+
+`--register-ip` 规则：
+
+- 仅 `-R` 模式可用；`-L` 模式传入会报错
+- 支持 `ip` 或 `ip:port`（IPv6 端口写法如 `[fd00::1]:8443`）
+- 只接受 IP 字面量，不接受域名
+- 若只给 `ip`，端口按注册协议默认值补齐：`wss/https -> 443`，`ws/http -> 80`
+- 若给 `ip:port`，按显式端口连接
+
 ### 2) `-L`：本地反向代理（受管域名回流到本地端口）
 
 ```bash
@@ -176,7 +190,7 @@ HTTPS_PROXY_AGENT_TOKENS=<TOKEN> go run ./cmd/gateway --listen 127.0.0.1:19080
 go run ./cmd/clockbridge-cli \
   -x-token <TOKEN> \
   -R http://127.0.0.1:19090/ \
-  cs1@127.0.0.1:19080
+  cs1@http://127.0.0.1:19080
 ```
 
 3) 轻量验证（页面与静态资源）：
