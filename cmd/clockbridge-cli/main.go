@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -30,6 +32,7 @@ const (
 func main() {
 	localSpec := flag.String("L", "", "local forward ([bind_addr:]port)，例如 127.0.0.1:28789")
 	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/")
+	registerIP := flag.String("register-ip", "", "register connect override: ip or ip:port（仅覆盖 TCP 连接，Host/SNI 仍用 register host）")
 	identityFile := flag.String("i", "", "identity file（Bearer token 文件，ssh 风格）")
 	bearerTokenFlag := flag.String("token", "", "Bearer token（调试用，可选）")
 	xToken := flag.String("x-token", "", "register 用 X-Token（兼容旧网关，可选）")
@@ -57,11 +60,14 @@ func main() {
 
 	switch runMode {
 	case modeLocalForward:
+		if strings.TrimSpace(*registerIP) != "" {
+			log.Fatal("flag --register-ip is only valid in -R mode")
+		}
 		if err := runLocalForward(ctx, *localSpec, flag.Args(), bearerToken, bearerSource, *xToken); err != nil {
 			log.Fatal(err)
 		}
 	case modeRemoteForward:
-		if err := runRemoteForward(ctx, *remoteTarget, flag.Args(), bearerToken, bearerSource, *xToken); err != nil {
+		if err := runRemoteForward(ctx, *remoteTarget, flag.Args(), *registerIP, bearerToken, bearerSource, *xToken); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -137,6 +143,7 @@ func runRemoteForward(
 	ctx context.Context,
 	remoteTarget string,
 	args []string,
+	registerIP string,
 	bearerToken string,
 	bearerSource string,
 	xToken string,
@@ -156,6 +163,10 @@ func runRemoteForward(
 	if err != nil {
 		return err
 	}
+	registerDialAddr, err := resolveRegisterDialAddr(registerIP, registerURL)
+	if err != nil {
+		return err
+	}
 
 	if strings.TrimSpace(xToken) == "" && bearerToken == "" {
 		log.Printf("[clockbridge-cli] warning: no auth headers configured (X-Token/Authorization)")
@@ -167,8 +178,15 @@ func runRemoteForward(
 			log.Printf("[clockbridge-cli] register Authorization bearer: enabled source=%s", bearerSource)
 		}
 	}
+	if registerDialAddr != "" {
+		log.Printf(
+			"[clockbridge-cli] register dial override: connect=%s host_sni=%s",
+			registerDialAddr,
+			registerURL.Hostname(),
+		)
+	}
 
-	a := agent.New(registerURL, strings.TrimSpace(xToken), bearerToken, target)
+	a := agent.New(registerURL, registerDialAddr, strings.TrimSpace(xToken), bearerToken, target)
 	if err := a.Run(ctx); err != nil && err != context.Canceled {
 		return fmt.Errorf("agent exit: %w", err)
 	}
@@ -242,6 +260,48 @@ func buildRegisterURL(registerHost, uuid string) (*url.URL, error) {
 	q.Set("uuid", uuid)
 	u.RawQuery = q.Encode()
 	return u, nil
+}
+
+func resolveRegisterDialAddr(raw string, registerURL *url.URL) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+
+	if strings.Contains(value, "://") {
+		return "", fmt.Errorf("invalid --register-ip %q: scheme is not allowed", raw)
+	}
+
+	defaultPort := registerURL.Port()
+	if defaultPort == "" {
+		switch strings.ToLower(strings.TrimSpace(registerURL.Scheme)) {
+		case "wss", "https":
+			defaultPort = "443"
+		case "ws", "http":
+			defaultPort = "80"
+		default:
+			return "", fmt.Errorf("invalid register URL scheme %q for --register-ip", registerURL.Scheme)
+		}
+	}
+
+	if ip, err := netip.ParseAddr(value); err == nil {
+		return net.JoinHostPort(ip.String(), defaultPort), nil
+	}
+
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid --register-ip %q, expected ip or ip:port", raw)
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(host))
+	if err != nil {
+		return "", fmt.Errorf("invalid --register-ip host %q: must be IP literal", host)
+	}
+	port = strings.TrimSpace(port)
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return "", fmt.Errorf("invalid --register-ip port %q", port)
+	}
+	return net.JoinHostPort(ip.String(), port), nil
 }
 
 func parseHTTPURL(raw string, field string) (*url.URL, error) {

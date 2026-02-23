@@ -23,6 +23,7 @@ import (
 
 type Agent struct {
 	registerURL         *url.URL
+	registerDialAddr    string
 	registerXToken      string
 	registerBearerToken string
 	targetBase          *url.URL
@@ -50,7 +51,7 @@ type stream struct {
 	closeOnce sync.Once
 }
 
-func New(registerURL *url.URL, registerXToken string, registerBearerToken string, targetBase *url.URL) *Agent {
+func New(registerURL *url.URL, registerDialAddr string, registerXToken string, registerBearerToken string, targetBase *url.URL) *Agent {
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -63,6 +64,7 @@ func New(registerURL *url.URL, registerXToken string, registerBearerToken string
 	}
 	return &Agent{
 		registerURL:         registerURL,
+		registerDialAddr:    registerDialAddr,
 		registerXToken:      registerXToken,
 		registerBearerToken: registerBearerToken,
 		targetBase:          targetBase,
@@ -84,6 +86,12 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+		if a.registerDialAddr != "" {
+			dialAddr := a.registerDialAddr
+			dialer.NetDialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, dialAddr)
+			}
+		}
 		h := http.Header{}
 		if a.registerXToken != "" {
 			h.Set("X-Token", a.registerXToken)

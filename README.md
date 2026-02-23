@@ -93,6 +93,7 @@ clockbridge-cli -L [bind_addr:]<port> <upstream_url>
 clockbridge-cli \
   -i /path/to/token.txt \
   -x-token <legacy_x_token_optional> \
+  --register-ip 10.0.0.12 \
   -R http://127.0.0.1:<app_port>/<base_path> \
   <uuid>@register-https-proxy.example.com
 ```
@@ -101,6 +102,7 @@ clockbridge-cli \
 
 - clockbridge-cli 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
 - client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
+- 若设置 `--register-ip`，TCP 实际连接会改为该 IP（可选 `ip:port`），但请求 Host 与 TLS SNI 仍使用 `<register_host>`。
 
 ### 2) `-L`：本地反向代理（受管域名回流到本地端口）
 
@@ -122,6 +124,7 @@ clockbridge-cli \
 - `-i <file>`：Bearer token 文件（ssh 风格 identity file）
 - `--token <token>`：Bearer token 直传（调试）
 - `-x-token <token>`：仅 `-R` 模式使用（兼容旧网关 X-Token）
+- `--register-ip <ip|ip:port>`：仅 `-R` 模式使用，覆盖 register 的 TCP 连接目标；适用于“连内网 IP 但保持域名 Host/SNI”
 - 环境变量兜底：
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN`
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN_PATH`
