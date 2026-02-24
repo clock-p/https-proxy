@@ -25,24 +25,32 @@ type agentConn struct {
 	closedCh  chan struct{}
 	closeOnce sync.Once
 
-	lastPingUnix atomic.Int64
+	bornAt              time.Time
+	lastActiveMonoNanos atomic.Int64
+	closeReasonVal      atomic.Value
 }
 
 func newAgentConn(uuid string, ws *websocket.Conn, maxStreams int) *agentConn {
+	now := time.Now()
 	c := &agentConn{
 		uuid:       uuid,
 		ws:         ws,
 		streams:    make(map[uint32]*stream),
 		maxStreams: maxStreams,
 		closedCh:   make(chan struct{}),
+		bornAt:     now,
 	}
-	c.lastPingUnix.Store(time.Now().Unix())
+	c.markActive()
 	return c
 }
 
 func (c *agentConn) closeWithErr(err error) {
-	_ = err
 	c.closeOnce.Do(func() {
+		reason := "connection closed"
+		if err != nil {
+			reason = err.Error()
+		}
+		c.closeReasonVal.Store(reason)
 		close(c.closedCh)
 		c.streamMu.Lock()
 		for _, s := range c.streams {
@@ -51,6 +59,27 @@ func (c *agentConn) closeWithErr(err error) {
 		c.streams = make(map[uint32]*stream)
 		c.streamMu.Unlock()
 	})
+}
+
+func (c *agentConn) markActive() {
+	c.lastActiveMonoNanos.Store(time.Since(c.bornAt).Nanoseconds())
+}
+
+func (c *agentConn) idleFor() time.Duration {
+	last := time.Duration(c.lastActiveMonoNanos.Load())
+	idle := time.Since(c.bornAt) - last
+	if idle < 0 {
+		return 0
+	}
+	return idle
+}
+
+func (c *agentConn) closeReason() string {
+	v := c.closeReasonVal.Load()
+	if s, ok := v.(string); ok && s != "" {
+		return s
+	}
+	return "connection closed"
 }
 
 func (c *agentConn) newStream() (*stream, error) {
@@ -92,7 +121,7 @@ func (c *agentConn) readLoop() {
 	defer c.closeWithErr(errors.New("readLoop exit"))
 
 	c.ws.SetPingHandler(func(appData string) error {
-		c.lastPingUnix.Store(time.Now().Unix())
+		c.markActive()
 		c.writeMu.Lock()
 		defer c.writeMu.Unlock()
 		return c.ws.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(2*time.Second))
@@ -103,6 +132,7 @@ func (c *agentConn) readLoop() {
 		if err != nil {
 			return
 		}
+		c.markActive()
 		if mt != websocket.BinaryMessage {
 			continue
 		}

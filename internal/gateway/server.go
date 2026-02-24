@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +17,11 @@ import (
 	"github.com/clock-p/clockbridge/internal/proto"
 	"github.com/clock-p/clockbridge/internal/shared"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	defaultAgentPingInterval = 20 * time.Second
+	minHeartbeatGrace        = 5 * time.Second
 )
 
 type Server struct {
@@ -61,6 +67,27 @@ func NewServerFromEnv() *Server {
 	heartbeatTimeout := envDuration("HTTPS_PROXY_HEARTBEAT_TIMEOUT", 60*time.Second)
 	firstRespTimeout := envDuration("HTTPS_PROXY_FIRST_RESPONSE_TIMEOUT", 30*time.Second)
 	wsOpenTimeout := envDuration("HTTPS_PROXY_WS_OPEN_TIMEOUT", 10*time.Second)
+	pingIntervalHint := envDuration("HTTPS_PROXY_PING_INTERVAL_HINT", defaultAgentPingInterval)
+	if pingIntervalHint <= 0 {
+		pingIntervalHint = defaultAgentPingInterval
+	}
+	heartbeatGrace := envDuration("HTTPS_PROXY_HEARTBEAT_GRACE", minHeartbeatGrace)
+	if heartbeatGrace < minHeartbeatGrace {
+		heartbeatGrace = minHeartbeatGrace
+	}
+	if heartbeatTimeout > 0 {
+		minHeartbeat := pingIntervalHint + heartbeatGrace
+		if heartbeatTimeout < minHeartbeat {
+			log.Printf(
+				"[clockbridge-gateway] adjust heartbeat timeout from %s to %s (ping_interval_hint=%s grace=%s)",
+				heartbeatTimeout,
+				minHeartbeat,
+				pingIntervalHint,
+				heartbeatGrace,
+			)
+			heartbeatTimeout = minHeartbeat
+		}
+	}
 
 	return &Server{
 		agentTokenSet: set,
@@ -177,6 +204,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.mu.lock()
 	if old := s.agentByUUID[uuid]; old != nil {
 		s.mu.unlock()
+		log.Printf("[clockbridge-gateway] reject register uuid=%s remote=%s reason=uuid_already_active", uuid, r.RemoteAddr)
 		_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(4009, "uuid already active"), time.Now().Add(2*time.Second))
 		_ = ws.Close()
 		return
@@ -184,43 +212,50 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	c := newAgentConn(uuid, ws, s.maxStreamsPerAgent)
 	s.agentByUUID[uuid] = c
 	s.mu.unlock()
+	log.Printf("[clockbridge-gateway] agent online uuid=%s remote=%s", uuid, r.RemoteAddr)
 
 	go c.readLoop()
 	go func() {
 		<-c.closedCh
-		s.mu.lock()
-		if s.agentByUUID[uuid] == c {
-			delete(s.agentByUUID, uuid)
-		}
-		s.mu.unlock()
+		s.removeAgentIfMatch(uuid, c, c.closeReason())
 	}()
 
 	if s.heartbeatTimeout > 0 {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
-			defer func() {
-				s.mu.lock()
-				if s.agentByUUID[uuid] == c {
-					delete(s.agentByUUID, uuid)
-				}
-				s.mu.unlock()
-				_ = ws.Close()
-				c.closeWithErr(errors.New("heartbeat timeout"))
-			}()
-
 			for {
 				select {
 				case <-c.closedCh:
 					return
 				case <-ticker.C:
-					last := time.Unix(c.lastPingUnix.Load(), 0)
-					if time.Since(last) > s.heartbeatTimeout {
+					idle := c.idleFor()
+					if idle > s.heartbeatTimeout {
+						reason := fmt.Sprintf("heartbeat timeout idle=%s timeout=%s", idle, s.heartbeatTimeout)
+						s.removeAgentIfMatch(uuid, c, reason)
+						_ = ws.Close()
+						c.closeWithErr(errors.New(reason))
 						return
 					}
 				}
 			}
 		}()
+	}
+}
+
+func (s *Server) removeAgentIfMatch(uuid string, c *agentConn, reason string) {
+	if reason == "" {
+		reason = "unknown"
+	}
+	removed := false
+	s.mu.lock()
+	if s.agentByUUID[uuid] == c {
+		delete(s.agentByUUID, uuid)
+		removed = true
+	}
+	s.mu.unlock()
+	if removed {
+		log.Printf("[clockbridge-gateway] agent offline uuid=%s reason=%s", uuid, reason)
 	}
 }
 

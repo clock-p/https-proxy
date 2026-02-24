@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,8 +37,9 @@ type Agent struct {
 type connState struct {
 	a *Agent
 
-	ws      *websocket.Conn
-	writeMu sync.Mutex
+	ws          *websocket.Conn
+	writeMu     sync.Mutex
+	lastPongLog time.Time
 
 	streamMu sync.Mutex
 	streams  map[uint32]*stream
@@ -100,11 +102,22 @@ func (a *Agent) Run(ctx context.Context) error {
 			h.Set("Authorization", "Bearer "+a.registerBearerToken)
 		}
 
-		ws, _, err := dialer.DialContext(ctx, a.registerURL.String(), h)
+		ws, resp, err := dialer.DialContext(ctx, a.registerURL.String(), h)
 		if err != nil {
 			attempt++
 			wait := reconnectBackoff(rnd, attempt)
-			log.Printf("[clockbridge-cli] dial failed (attempt=%d) register_url=%s err=%v; retry in %s", attempt, a.registerURL.String(), err, wait)
+			if hs := handshakeSummary(resp); hs != "" {
+				log.Printf(
+					"[clockbridge-cli] dial failed (attempt=%d) register_url=%s err=%v handshake={%s}; retry in %s",
+					attempt,
+					a.registerURL.String(),
+					err,
+					hs,
+					wait,
+				)
+			} else {
+				log.Printf("[clockbridge-cli] dial failed (attempt=%d) register_url=%s err=%v; retry in %s", attempt, a.registerURL.String(), err, wait)
+			}
 			if !sleepWithContext(ctx, wait) {
 				return ctx.Err()
 			}
@@ -120,7 +133,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			streams: make(map[uint32]*stream),
 		}
 
-		log.Printf("[clockbridge-cli] connected register_url=%s target=%s", a.registerURL.String(), a.targetBase.String())
+		log.Printf(
+			"[clockbridge-cli] connected register_url=%s target=%s local=%s remote=%s handshake={%s}",
+			a.registerURL.String(),
+			a.targetBase.String(),
+			connAddrLocal(ws),
+			connAddrRemote(ws),
+			handshakeSummary(resp),
+		)
 
 		// Ensure ctrl+C (ctx cancellation) unblocks ReadMessage promptly.
 		connCtx, cancel := context.WithCancel(ctx)
@@ -199,9 +219,58 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+func connAddrLocal(ws *websocket.Conn) string {
+	if ws == nil || ws.UnderlyingConn() == nil || ws.UnderlyingConn().LocalAddr() == nil {
+		return "-"
+	}
+	return ws.UnderlyingConn().LocalAddr().String()
+}
+
+func connAddrRemote(ws *websocket.Conn) string {
+	if ws == nil || ws.UnderlyingConn() == nil || ws.UnderlyingConn().RemoteAddr() == nil {
+		return "-"
+	}
+	return ws.UnderlyingConn().RemoteAddr().String()
+}
+
+func handshakeSummary(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+
+	status := resp.Status
+	location := resp.Header.Get("Location")
+	bodySnippet := ""
+	if resp.Body != nil {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		if err == nil {
+			bodySnippet = string(data)
+		}
+	}
+	if bodySnippet == "" {
+		bodySnippet = "-"
+	}
+	if location == "" {
+		return fmt.Sprintf("status=%s body=%q", status, bodySnippet)
+	}
+	return fmt.Sprintf("status=%s location=%q body=%q", status, location, bodySnippet)
+}
+
 func (s *connState) run(ctx context.Context) error {
 	s.ws.SetPongHandler(func(appData string) error {
 		_ = s.ws.SetReadDeadline(time.Now().Add(90 * time.Second))
+		now := time.Now()
+		if s.lastPongLog.IsZero() || now.Sub(s.lastPongLog) >= 60*time.Second {
+			log.Printf("[clockbridge-cli] heartbeat pong register_url=%s", s.a.registerURL.String())
+			s.lastPongLog = now
+		}
+		return nil
+	})
+	s.ws.SetCloseHandler(func(code int, text string) error {
+		log.Printf("[clockbridge-cli] register close frame code=%d reason=%q", code, text)
+		msg := websocket.FormatCloseMessage(code, "")
+		_ = s.ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
 		return nil
 	})
 	s.ws.SetReadLimit(s.a.wsReadLimit)
@@ -220,8 +289,13 @@ func (s *connState) pingLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.writeMu.Lock()
-			_ = s.ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
+			err := s.ws.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
 			s.writeMu.Unlock()
+			if err != nil {
+				log.Printf("[clockbridge-cli] heartbeat ping failed register_url=%s err=%v", s.a.registerURL.String(), err)
+				_ = s.ws.Close()
+				return
+			}
 		}
 	}
 }
@@ -235,13 +309,24 @@ func (s *connState) readLoop(ctx context.Context) error {
 		}
 		mt, msg, err := s.ws.ReadMessage()
 		if err != nil {
+			if code, text, ok := shared.CloseFromErr(err); ok {
+				log.Printf("[clockbridge-cli] read loop closed code=%d reason=%q", code, text)
+			} else if errors.Is(err, net.ErrClosed) {
+				log.Printf("[clockbridge-cli] read loop connection closed err=%v", err)
+			} else {
+				log.Printf("[clockbridge-cli] read loop error err=%v", err)
+			}
 			return err
 		}
 		if mt != websocket.BinaryMessage {
+			if mt != websocket.PingMessage && mt != websocket.PongMessage {
+				log.Printf("[clockbridge-cli] ignore ws message type=%d len=%d", mt, len(msg))
+			}
 			continue
 		}
 		f, err := proto.DecodeFrame(msg)
 		if err != nil {
+			log.Printf("[clockbridge-cli] drop bad frame len=%d err=%v", len(msg), err)
 			continue
 		}
 		st := s.getOrCreateStream(ctx, f.Stream)
@@ -286,7 +371,11 @@ func (s *connState) send(t byte, stream uint32, payload []byte) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	_ = s.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return s.ws.WriteMessage(websocket.BinaryMessage, b)
+	err := s.ws.WriteMessage(websocket.BinaryMessage, b)
+	if err != nil {
+		log.Printf("[clockbridge-cli] send frame failed stream=%d type=%d err=%v", stream, t, err)
+	}
+	return err
 }
 
 func (s *connState) deliverFrame(st *stream, f proto.Frame) bool {
@@ -296,6 +385,7 @@ func (s *connState) deliverFrame(st *stream, f proto.Frame) bool {
 	case st.rx <- f:
 		return true
 	default:
+		log.Printf("[clockbridge-cli] stream rx overflow stream=%d", st.id)
 		_ = s.send(proto.TRst, st.id, []byte("stream rx overflow"))
 		s.forgetStream(st.id)
 		return false
@@ -312,11 +402,13 @@ func (s *connState) handleStream(ctx context.Context, st *stream) {
 	case f = <-st.rx:
 	}
 	if f.Type != proto.TReqStart {
+		log.Printf("[clockbridge-cli] invalid first frame stream=%d type=%d", st.id, f.Type)
 		_ = s.send(proto.TRst, st.id, []byte("missing req_start"))
 		return
 	}
 	var rs proto.ReqStart
 	if err := json.Unmarshal(f.Payload, &rs); err != nil {
+		log.Printf("[clockbridge-cli] bad req_start stream=%d err=%v", st.id, err)
 		_ = s.send(proto.TRst, st.id, []byte("bad req_start"))
 		return
 	}
@@ -336,6 +428,7 @@ func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStar
 
 	req, err := http.NewRequestWithContext(reqCtx, rs.Method, "", pr)
 	if err != nil {
+		log.Printf("[clockbridge-cli] build upstream request failed stream=%d method=%s path=%s err=%v", st.id, rs.Method, rs.Path, err)
 		_ = s.send(proto.TRst, st.id, []byte("bad request"))
 		return
 	}
@@ -355,6 +448,7 @@ func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStar
 				case proto.TReqData:
 					if len(f.Payload) > 0 {
 						if _, err := pw.Write(f.Payload); err != nil {
+							log.Printf("[clockbridge-cli] upstream request body write failed stream=%d err=%v", st.id, err)
 							cancel()
 							return
 						}
@@ -413,6 +507,13 @@ func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStar
 
 	resp, err := s.a.httpClient.Do(req)
 	if err != nil {
+		log.Printf(
+			"[clockbridge-cli] upstream request failed stream=%d method=%s target=%s err=%v",
+			st.id,
+			rs.Method,
+			target.String(),
+			err,
+		)
 		_ = s.send(proto.TResStart, st.id, proto.MustJSON(proto.ResStart{Status: http.StatusBadGateway}))
 		_ = s.send(proto.TResEnd, st.id, nil)
 		return
@@ -441,6 +542,9 @@ func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStar
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				log.Printf("[clockbridge-cli] upstream response read failed stream=%d target=%s err=%v", st.id, target.String(), err)
+			}
 			break
 		}
 	}
@@ -470,6 +574,7 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 
 	wsUp, _, err := dialer.DialContext(ctx, targetWS.String(), h)
 	if err != nil {
+		log.Printf("[clockbridge-cli] upstream websocket dial failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
 		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
 		return
 	}
@@ -493,6 +598,7 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 		for {
 			mt, data, err := wsUp.ReadMessage()
 			if err != nil {
+				log.Printf("[clockbridge-cli] upstream websocket read failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
 				if code, reason, ok := shared.CloseFromErr(err); ok {
 					sendCloseToGateway(code, reason)
 				} else {
@@ -525,6 +631,7 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 				mt := int(f.Payload[0])
 				data := f.Payload[1:]
 				if err := wsUp.WriteMessage(mt, data); err != nil {
+					log.Printf("[clockbridge-cli] upstream websocket write failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
 					if code, reason, ok := shared.CloseFromErr(err); ok {
 						sendCloseToGateway(code, reason)
 					} else {
@@ -537,9 +644,11 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 				_ = json.Unmarshal(f.Payload, &c)
 				code := shared.SanitizeCloseCode(c.Code)
 				reason := c.Reason
+				log.Printf("[clockbridge-cli] gateway websocket close stream=%d code=%d reason=%q", st.id, code, reason)
 				_ = wsUp.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(2*time.Second))
 				return
 			case proto.TRst:
+				log.Printf("[clockbridge-cli] gateway reset websocket stream=%d", st.id)
 				return
 			}
 		}
