@@ -420,6 +420,10 @@ func (s *Server) handleClientHTTP(w http.ResponseWriter, r *http.Request, agent 
 	w.WriteHeader(resStart.Status)
 
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		// Ensure streaming clients (e.g. SSE) receive response headers immediately.
+		flusher.Flush()
+	}
 	idle := s.streamIdleTimeout
 	for {
 		f2, err := st.recv(idle)
@@ -667,6 +671,12 @@ func (w *logResponseWriter) statusOr(def int) int {
 		return def
 	}
 	return w.status
+}
+
+func (w *logResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func logAccess(id uint64, uuid, method, path string, status int, bytes int64, start time.Time) {
