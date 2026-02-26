@@ -37,7 +37,7 @@
   - 未带 scheme：按 `https` 处理（注册走 `wss`）
   - `http://...`：注册走 `ws`
   - `https://...`：注册走 `wss`
-- `--register-ip`（可选）只覆盖 TCP 连接地址，Host/TLS SNI 仍来自 register host（用于“连内网 IP、保持域名校验”）
+- `--register-ip`（可选）只覆盖 TCP 连接地址，支持 `ip`/`ip:port`/`hostname[:port]`，传域名时本地解析（优先 A 记录，回退 AAAA）；Host/TLS SNI 仍来自 register host（用于“连内网 IP、保持域名校验”）
 - Gateway 行为：
   - 校验 Token
   - 若 uuid 已被活跃连接占用 → 拒绝

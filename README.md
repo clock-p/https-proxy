@@ -102,7 +102,7 @@ clockbridge-cli \
 
 - clockbridge-cli 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
 - client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
-- 若设置 `--register-ip`，TCP 实际连接会改为该 IP（可选 `ip:port`），但请求 Host 与 TLS SNI 仍使用 `<register_host>`。
+- 若设置 `--register-ip`，TCP 实际连接会改为该地址（支持 `ip`/`ip:port`/`hostname[:port]`），但请求 Host 与 TLS SNI 仍使用 `<register_host>`。
 
 `<register_host>` 协议规则：
 
@@ -113,10 +113,10 @@ clockbridge-cli \
 `--register-ip` 规则：
 
 - 仅 `-R` 模式可用；`-L` 模式传入会报错
-- 支持 `ip` 或 `ip:port`（IPv6 端口写法如 `[fd00::1]:8443`）
-- 只接受 IP 字面量，不接受域名
+- 支持 `ip`、`ip:port` 或 `hostname[:port]`（IPv6 端口写法如 `[fd00::1]:8443`）
+- 传域名时会在本地做 DNS 解析（优先 A 记录，回退 AAAA）
 - 若只给 `ip`，端口按注册协议默认值补齐：`wss/https -> 443`，`ws/http -> 80`
-- 若给 `ip:port`，按显式端口连接
+- 若给 `ip:port` 或 `hostname:port`，按显式端口连接
 
 ### 2) `-L`：本地反向代理（受管域名回流到本地端口）
 
@@ -138,7 +138,7 @@ clockbridge-cli \
 - `-i <file>`：Bearer token 文件（ssh 风格 identity file）
 - `--token <token>`：Bearer token 直传（调试）
 - `-x-token <token>`：仅 `-R` 模式使用（兼容旧网关 X-Token）
-- `--register-ip <ip|ip:port>`：仅 `-R` 模式使用，覆盖 register 的 TCP 连接目标；适用于“连内网 IP 但保持域名 Host/SNI”
+- `--register-ip <ip|ip:port|hostname[:port]>`：仅 `-R` 模式使用，覆盖 register 的 TCP 连接目标；适用于“连内网 IP/域名但保持域名 Host/SNI”
 - 环境变量兜底：
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN`
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN_PATH`

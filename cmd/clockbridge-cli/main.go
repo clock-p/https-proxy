@@ -32,7 +32,7 @@ const (
 func main() {
 	localSpec := flag.String("L", "", "local forward ([bind_addr:]port)，例如 127.0.0.1:28789")
 	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/")
-	registerIP := flag.String("register-ip", "", "register connect override: ip or ip:port（仅覆盖 TCP 连接，Host/SNI 仍用 register host）")
+	registerIP := flag.String("register-ip", "", "register connect override: ip/ip:port/hostname[:port]（仅覆盖 TCP 连接，Host/SNI 仍用 register host）")
 	identityFile := flag.String("i", "", "identity file（Bearer token 文件，ssh 风格）")
 	bearerTokenFlag := flag.String("token", "", "Bearer token（调试用，可选）")
 	xToken := flag.String("x-token", "", "register 用 X-Token（兼容旧网关，可选）")
@@ -263,6 +263,16 @@ func buildRegisterURL(registerHost, uuid string) (*url.URL, error) {
 }
 
 func resolveRegisterDialAddr(raw string, registerURL *url.URL) (string, error) {
+	return resolveRegisterDialAddrWithLookup(raw, registerURL, func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	})
+}
+
+func resolveRegisterDialAddrWithLookup(
+	raw string,
+	registerURL *url.URL,
+	lookup func(context.Context, string) ([]net.IPAddr, error),
+) (string, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return "", nil
@@ -288,20 +298,48 @@ func resolveRegisterDialAddr(raw string, registerURL *url.URL) (string, error) {
 		return net.JoinHostPort(ip.String(), defaultPort), nil
 	}
 
-	host, port, err := net.SplitHostPort(value)
-	if err != nil {
-		return "", fmt.Errorf("invalid --register-ip %q, expected ip or ip:port", raw)
+	host := value
+	port := defaultPort
+	if splitHost, splitPort, err := net.SplitHostPort(value); err == nil {
+		host = strings.TrimSpace(splitHost)
+		port = strings.TrimSpace(splitPort)
+	} else if addrErr, ok := err.(*net.AddrError); !ok || !strings.Contains(strings.ToLower(addrErr.Err), "missing port") {
+		return "", fmt.Errorf("invalid --register-ip %q, expected ip, ip:port or hostname[:port]", raw)
 	}
-	ip, err := netip.ParseAddr(strings.TrimSpace(host))
-	if err != nil {
-		return "", fmt.Errorf("invalid --register-ip host %q: must be IP literal", host)
+
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", fmt.Errorf("invalid --register-ip %q, expected ip, ip:port or hostname[:port]", raw)
 	}
+
 	port = strings.TrimSpace(port)
 	portNum, err := strconv.Atoi(port)
 	if err != nil || portNum < 1 || portNum > 65535 {
 		return "", fmt.Errorf("invalid --register-ip port %q", port)
 	}
-	return net.JoinHostPort(ip.String(), port), nil
+
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return net.JoinHostPort(ip.String(), port), nil
+	}
+
+	if lookup == nil {
+		return "", errors.New("internal error: register ip resolver is nil")
+	}
+	resolved, err := lookup(context.Background(), host)
+	if err != nil {
+		return "", fmt.Errorf("resolve --register-ip host %q: %w", host, err)
+	}
+	for _, item := range resolved {
+		if ipv4 := item.IP.To4(); ipv4 != nil {
+			return net.JoinHostPort(ipv4.String(), port), nil
+		}
+	}
+	for _, item := range resolved {
+		if ipv6 := item.IP.To16(); ipv6 != nil {
+			return net.JoinHostPort(ipv6.String(), port), nil
+		}
+	}
+	return "", fmt.Errorf("resolve --register-ip host %q: no A/AAAA record", host)
 }
 
 func parseHTTPURL(raw string, field string) (*url.URL, error) {
