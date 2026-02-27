@@ -13,7 +13,9 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"net/url"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,16 +56,18 @@ type stream struct {
 }
 
 func New(registerURL *url.URL, registerDialAddr string, registerXToken string, registerBearerToken string, targetBase *url.URL) *Agent {
+	firstRespTimeout := envDuration("HTTPS_PROXY_FIRST_RESPONSE_TIMEOUT", 30*time.Second)
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
+		ResponseHeaderTimeout: firstRespTimeout,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
+	log.Printf("[clockbridge-cli] upstream first response timeout=%s", firstRespTimeout)
 	return &Agent{
 		registerURL:         registerURL,
 		registerDialAddr:    registerDialAddr,
@@ -76,6 +80,26 @@ func New(registerURL *url.URL, registerDialAddr string, registerXToken string, r
 			Transport: transport,
 		},
 	}
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		if d < 0 {
+			return def
+		}
+		return d
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n < 0 {
+			return def
+		}
+		return time.Duration(n) * time.Second
+	}
+	return def
 }
 
 func (a *Agent) Run(ctx context.Context) error {

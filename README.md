@@ -92,7 +92,7 @@ clockbridge-cli -L [bind_addr:]<port> <upstream_url>
 ```bash
 clockbridge-cli \
   -i /path/to/token.txt \
-  -x-token <legacy_x_token_optional> \
+  -x-token <x_token_optional> \
   --register-ip 10.0.0.12 \
   -R http://127.0.0.1:<app_port>/<base_path> \
   <uuid>@register-https-proxy.example.com
@@ -114,7 +114,7 @@ clockbridge-cli \
 
 - 仅 `-R` 模式可用；`-L` 模式传入会报错
 - 支持 `ip`、`ip:port` 或 `hostname[:port]`（IPv6 端口写法如 `[fd00::1]:8443`）
-- 传域名时会在本地做 DNS 解析（优先 A 记录，回退 AAAA）
+- 传域名时会在本地做 DNS 解析（查询顺序：A 记录 -> AAAA）
 - 若只给 `ip`，端口按注册协议默认值补齐：`wss/https -> 443`，`ws/http -> 80`
 - 若给 `ip:port` 或 `hostname:port`，按显式端口连接
 
@@ -137,7 +137,7 @@ clockbridge-cli \
 
 - `-i <file>`：Bearer token 文件（ssh 风格 identity file）
 - `--token <token>`：Bearer token 直传（调试）
-- `-x-token <token>`：仅 `-R` 模式使用（兼容旧网关 X-Token）
+- `-x-token <token>`：仅 `-R` 模式使用（X-Token 头）
 - `--register-ip <ip|ip:port|hostname[:port]>`：仅 `-R` 模式使用，覆盖 register 的 TCP 连接目标；适用于“连内网 IP/域名但保持域名 Host/SNI”
 - 环境变量兜底：
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN`
@@ -253,5 +253,5 @@ curl --http1.1 -X POST --data-binary @/tmp/https-proxy-big.bin http://127.0.0.1:
 
 ## 文档
 
-- 设计文档：`design.md`
-- 执行清单：`todo.md`
+- 项目目录与关键约束：`AGENTS.md`
+- 对外行为说明：本文档（`README.md`）
