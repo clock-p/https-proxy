@@ -11,8 +11,12 @@ import (
 )
 
 type agentConn struct {
-	uuid string
-	ws   *websocket.Conn
+	uuid               string
+	proxyModeRequested string
+	proxyModeEffective string
+	proxyModeReason    string
+	targetKind         string
+	ws                 *websocket.Conn
 
 	writeMu sync.Mutex
 
@@ -30,15 +34,27 @@ type agentConn struct {
 	closeReasonVal      atomic.Value
 }
 
-func newAgentConn(uuid string, ws *websocket.Conn, maxStreams int) *agentConn {
+func newAgentConn(
+	uuid string,
+	requestedProxyMode string,
+	effectiveProxyMode string,
+	proxyModeReason string,
+	targetKind string,
+	ws *websocket.Conn,
+	maxStreams int,
+) *agentConn {
 	now := time.Now()
 	c := &agentConn{
-		uuid:       uuid,
-		ws:         ws,
-		streams:    make(map[uint32]*stream),
-		maxStreams: maxStreams,
-		closedCh:   make(chan struct{}),
-		bornAt:     now,
+		uuid:               uuid,
+		proxyModeRequested: requestedProxyMode,
+		proxyModeEffective: effectiveProxyMode,
+		proxyModeReason:    proxyModeReason,
+		targetKind:         targetKind,
+		ws:                 ws,
+		streams:            make(map[uint32]*stream),
+		maxStreams:         maxStreams,
+		closedCh:           make(chan struct{}),
+		bornAt:             now,
 	}
 	c.markActive()
 	return c

@@ -10,6 +10,8 @@
 ## 2. 代码索引（功能去哪看）
 
 - gateway 入口与 `/register`、`/status`：`internal/gateway/server.go`
+- agent register 与上游转发：`internal/agent/agent.go`
+- proxy mode / target kind 共享语义：`internal/shared/proxymode.go`
 - CLI 参数与 register URL 组装：`cmd/clockbridge-cli/main.go`
 - 行为测试：`cmd/clockbridge-cli/main_test.go`
 - 环境变量与运行说明：`README.md`

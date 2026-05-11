@@ -17,6 +17,7 @@ import (
 
 	"github.com/clock-p/clockbridge/internal/agent"
 	"github.com/clock-p/clockbridge/internal/reverseproxy"
+	"github.com/clock-p/clockbridge/internal/shared"
 )
 
 var version = "dev"
@@ -31,7 +32,8 @@ const (
 
 func main() {
 	localSpec := flag.String("L", "", "local forward ([bind_addr:]port)，例如 127.0.0.1:28789")
-	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/")
+	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/ 或 tcp://127.0.0.1:22")
+	proxyMode := flag.String("proxy-mode", shared.ProxyModeLegacyFramed, "register proxy mode: legacy_framed|transparent_tunnel")
 	registerIP := flag.String("register-ip", "", "register connect override: ip/ip:port/hostname[:port]（仅覆盖 TCP 连接，Host/SNI 仍用 register host）")
 	identityFile := flag.String("i", "", "identity file（Bearer token 文件，ssh 风格）")
 	bearerTokenFlag := flag.String("token", "", "Bearer token（调试用，可选）")
@@ -67,7 +69,7 @@ func main() {
 			log.Fatal(err)
 		}
 	case modeRemoteForward:
-		if err := runRemoteForward(ctx, *remoteTarget, flag.Args(), *registerIP, bearerToken, bearerSource, *xToken); err != nil {
+		if err := runRemoteForward(ctx, *remoteTarget, flag.Args(), *proxyMode, *registerIP, bearerToken, bearerSource, *xToken); err != nil {
 			log.Fatal(err)
 		}
 	default:
@@ -83,6 +85,8 @@ func usage() {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -x-token <TOKEN> -R http://127.0.0.1:18789/ demo@register-https-proxy.example.com")
+	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -x-token <TOKEN> -R tcp://127.0.0.1:22 demo@register-https-proxy.example.com")
+	fmt.Fprintln(out, "  clockbridge-cli --proxy-mode transparent_tunnel -i /path/to/token.txt -R tcp://127.0.0.1:22 demo@register-https-proxy.example.com")
 	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -L 127.0.0.1:28789 https://demo.example.com/")
 	fmt.Fprintln(out, "")
 	flag.PrintDefaults()
@@ -143,6 +147,7 @@ func runRemoteForward(
 	ctx context.Context,
 	remoteTarget string,
 	args []string,
+	proxyMode string,
 	registerIP string,
 	bearerToken string,
 	bearerSource string,
@@ -151,15 +156,22 @@ func runRemoteForward(
 	if len(args) != 1 {
 		return errors.New("remote forward (-R) expects exactly one destination argument: <uuid>@<register_host>")
 	}
-	target, err := parseHTTPURL(remoteTarget, "remote target URL")
+	normalizedProxyMode, err := parseProxyMode(proxyMode)
 	if err != nil {
+		return err
+	}
+	target, err := parseRemoteTargetURL(remoteTarget, "remote target URL")
+	if err != nil {
+		return err
+	}
+	if err := validateProxyModeTarget(normalizedProxyMode, target); err != nil {
 		return err
 	}
 	uuid, registerHost, err := parseDestination(args[0])
 	if err != nil {
 		return err
 	}
-	registerURL, err := buildRegisterURL(registerHost, uuid)
+	registerURL, err := buildRegisterURL(registerHost, uuid, normalizedProxyMode, targetKindFromTargetURL(target))
 	if err != nil {
 		return err
 	}
@@ -228,7 +240,7 @@ func parseDestination(raw string) (uuid string, registerHost string, err error) 
 	return uuid, registerHost, nil
 }
 
-func buildRegisterURL(registerHost, uuid string) (*url.URL, error) {
+func buildRegisterURL(registerHost, uuid string, proxyMode string, targetKind string) (*url.URL, error) {
 	raw := strings.TrimSpace(registerHost)
 	if raw == "" {
 		return nil, errors.New("register host is empty")
@@ -258,8 +270,56 @@ func buildRegisterURL(registerHost, uuid string) (*url.URL, error) {
 	}
 	q := u.Query()
 	q.Set("uuid", uuid)
+	if strings.TrimSpace(proxyMode) != "" {
+		q.Set("proxy_mode", proxyMode)
+	}
+	normalizedTargetKind, err := shared.NormalizeTargetKind(targetKind)
+	if err != nil {
+		return nil, fmt.Errorf("invalid target kind %q: %w", targetKind, err)
+	}
+	if normalizedTargetKind != shared.TargetKindUnknown {
+		q.Set("target_kind", normalizedTargetKind)
+	}
 	u.RawQuery = q.Encode()
 	return u, nil
+}
+
+func targetKindFromTargetURL(target *url.URL) string {
+	if target == nil {
+		return shared.TargetKindUnknown
+	}
+	switch strings.ToLower(strings.TrimSpace(target.Scheme)) {
+	case "http", "https":
+		return shared.TargetKindHTTP
+	case "tcp":
+		return shared.TargetKindTCP
+	case "ws", "wss":
+		return shared.TargetKindWebSocket
+	default:
+		return shared.TargetKindUnknown
+	}
+}
+
+func parseProxyMode(raw string) (string, error) {
+	value, err := shared.NormalizeProxyMode(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid --proxy-mode: %w", err)
+	}
+	return value, nil
+}
+
+func validateProxyModeTarget(proxyMode string, target *url.URL) error {
+	if proxyMode != shared.ProxyModeTransparentTunnel {
+		return nil
+	}
+	if target == nil {
+		return errors.New("--proxy-mode transparent_tunnel requires -R tcp://host:port or ws(s)://host[:port]/... target")
+	}
+	scheme := strings.ToLower(strings.TrimSpace(target.Scheme))
+	if scheme != "tcp" && scheme != "ws" && scheme != "wss" {
+		return errors.New("--proxy-mode transparent_tunnel currently supports only tcp:// or ws(s):// targets")
+	}
+	return nil
 }
 
 func resolveRegisterDialAddr(raw string, registerURL *url.URL) (string, error) {
@@ -340,6 +400,33 @@ func resolveRegisterDialAddrWithLookup(
 		}
 	}
 	return "", fmt.Errorf("resolve --register-ip host %q: no A/AAAA record", host)
+}
+
+func parseRemoteTargetURL(raw string, field string) (*url.URL, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return nil, fmt.Errorf("%s is empty", field)
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s %q: %w", field, raw, err)
+	}
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "ws" && scheme != "wss" {
+		return nil, fmt.Errorf("invalid %s %q: only http/https/tcp/ws/wss are supported", field, raw)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return nil, fmt.Errorf("invalid %s %q: missing host", field, raw)
+	}
+	if scheme == "tcp" {
+		if strings.TrimSpace(u.Port()) == "" {
+			return nil, fmt.Errorf("invalid %s %q: tcp target requires explicit port", field, raw)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return nil, fmt.Errorf("invalid %s %q: tcp target must not include path", field, raw)
+		}
+	}
+	return u, nil
 }
 
 func parseHTTPURL(raw string, field string) (*url.URL, error) {

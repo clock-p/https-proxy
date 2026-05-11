@@ -26,8 +26,15 @@ type WsOpenErr struct {
 }
 
 type WsOpenOK struct {
-	Subprotocol string `json:"p,omitempty"`
+	Subprotocol string   `json:"p,omitempty"`
+	RelayMode   string   `json:"r,omitempty"` // framed | raw
+	Extensions  []string `json:"x,omitempty"`
 }
+
+const (
+	WsRelayModeFramed = "framed"
+	WsRelayModeRaw    = "raw"
+)
 
 type WsClose struct {
 	Code   int    `json:"c,omitempty"`

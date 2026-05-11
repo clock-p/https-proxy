@@ -101,16 +101,40 @@ clockbridge-cli -L [bind_addr:]<port> <upstream_url>
 clockbridge-cli \
   -i /path/to/token.txt \
   -x-token <x_token_optional> \
+  --proxy-mode legacy_framed \
   --register-ip 10.0.0.12 \
   -R http://127.0.0.1:<app_port>/<base_path> \
   <uuid>@register-https-proxy.example.com
 ```
+
+`<target_url>` 支持：
+
+- `http(s)://...`：现有 HTTP/WS 反代语义
+- `tcp://host:port`：把客户端发起的 WebSocket 连接转发到本地 TCP 服务（如 `tcp://127.0.0.1:22`）
+
+`proxy_mode` 与 target 约束：
+
+- `legacy_framed`：支持 `http(s)` / `tcp` / `ws(s)` target
+- `transparent_tunnel`：当前支持 `tcp://host:port` 与 `ws(s)://host[:port]/...` target
+- `transparent_tunnel`：当前仅作用于 client WebSocket 请求路径；普通 HTTP 请求仍走 legacy 语义
+- `transparent_tunnel + ws(s)`：网关/agent 在升级完成后进入 raw relay（不做 WS message 级解析），用于提升 `wstunnel` 等隧道兼容性
 
 效果：
 
 - clockbridge-cli 会构造 `wss://register-https-proxy.example.com/register?uuid=<uuid>` 进行注册。
 - client 侧仍通过受管地址访问：`https://<uuid>.example.com/...` 或 path 模式。
 - 若设置 `--register-ip`，TCP 实际连接会改为该地址（支持 `ip`/`ip:port`/`hostname[:port]`），但请求 Host 与 TLS SNI 仍使用 `<register_host>`。
+- `--proxy-mode` 会随 register 请求携带 `proxy_mode` 能力（当前支持：`legacy_framed`、`transparent_tunnel`）。
+- `clockbridge-cli` 会基于 `-R` target 自动附带 `target_kind`（`http`/`tcp`/`ws`），供网关选择 transparent 子路径。
+
+`/status` 返回说明（兼容旧字段）：
+
+- 保留：`ok`、`count`、`uuids`
+- `proxy_modes`：`uuid -> effective_proxy_mode`（当前生效模式）
+- `proxy_modes_requested`：`uuid -> requested_proxy_mode`（agent 注册声明）
+- `proxy_mode_reasons`：`uuid -> resolve_reason`（模式决策原因）
+- `target_kinds`：`uuid -> target_kind`（register 声明）
+- `proxy_mode_policy`：当前网关策略快照（`transparent_enabled`、`force_legacy_mode`、`allow_uuids`、`allow_prefixes`）
 
 `<register_host>` 协议规则：
 
@@ -146,6 +170,7 @@ clockbridge-cli \
 - `-i <file>`：Bearer token 文件（ssh 风格 identity file）
 - `--token <token>`：Bearer token 直传（调试）
 - `-x-token <token>`：仅 `-R` 模式使用（X-Token 头）
+- `--proxy-mode <legacy_framed|transparent_tunnel>`：仅 `-R` 模式使用；声明实例数据面模式（默认 `legacy_framed`，`transparent_tunnel` 当前支持 `tcp://` 与 `ws(s)://` target）
 - `--register-ip <ip|ip:port|hostname[:port]>`：仅 `-R` 模式使用，覆盖 register 的 TCP 连接目标；适用于“连内网 IP/域名但保持域名 Host/SNI”
 - 环境变量兜底：
   - `CLOCKBRIDGE_HTTPS_PROXY_TOKEN`
@@ -168,8 +193,14 @@ clockbridge-cli \
 - `HTTPS_PROXY_HEARTBEAT_TIMEOUT`：Agent 心跳超时（默认 60s，设为 `0` 关闭心跳监测）
 - `HTTPS_PROXY_FIRST_RESPONSE_TIMEOUT`：等待首包超时（默认 30s，设为 `0` 关闭）
 - `HTTPS_PROXY_WS_OPEN_TIMEOUT`：等待 WS 握手超时（默认 10s，设为 `0` 关闭）
+- `HTTPS_PROXY_CLIENT_WS_PING_INTERVAL`：gateway 主动向 client WebSocket 发送 ping 的间隔（默认 `0` 关闭；反代链路存在 idle timeout 时建议设置为 `25s`）
+- `HTTPS_PROXY_CLIENT_WS_PING_DEBUG`：记录 client WebSocket ping/pong 调试日志（默认 `false`）
 - `HTTPS_PROXY_HTTP_READ_HEADER_TIMEOUT`：网关 HTTP 读请求头超时（默认 5s，设为 `0` 关闭）
 - `HTTPS_PROXY_HTTP_IDLE_TIMEOUT`：网关 HTTP KeepAlive 空闲超时（默认 120s，设为 `0` 关闭）
+- `HTTPS_PROXY_TRANSPARENT_ENABLED`：是否允许 transparent 能力进入生效决策（默认 `false`）
+- `HTTPS_PROXY_TRANSPARENT_ALLOW_UUIDS`：transparent 白名单（精确 uuid，逗号分隔）
+- `HTTPS_PROXY_TRANSPARENT_ALLOW_PREFIXES`：transparent 白名单（uuid 前缀，逗号分隔）
+- `HTTPS_PROXY_FORCE_LEGACY_MODE`：强制全部回退 legacy（默认 `false`）
 - WebSocket 单条消息读取上限：10MB（gateway/client、gateway/cli、cli/upstream 统一）
 
 ## Phase5：code-server 轻量验证（本地）

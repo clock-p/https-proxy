@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,8 @@ type Agent struct {
 	registerDialAddr    string
 	registerXToken      string
 	registerBearerToken string
+	registerProxyMode   string
+	registerTargetKind  string
 	targetBase          *url.URL
 	wsReadLimit         int64
 
@@ -42,6 +46,7 @@ type connState struct {
 	ws          *websocket.Conn
 	writeMu     sync.Mutex
 	lastPongLog time.Time
+	proxyMode   string
 
 	streamMu sync.Mutex
 	streams  map[uint32]*stream
@@ -73,6 +78,8 @@ func New(registerURL *url.URL, registerDialAddr string, registerXToken string, r
 		registerDialAddr:    registerDialAddr,
 		registerXToken:      registerXToken,
 		registerBearerToken: registerBearerToken,
+		registerProxyMode:   proxyModeFromRegisterURL(registerURL),
+		registerTargetKind:  targetKindFromRegisterURL(registerURL),
 		targetBase:          targetBase,
 		wsReadLimit:         shared.WSReadLimitBytes,
 		httpTransport:       transport,
@@ -80,6 +87,28 @@ func New(registerURL *url.URL, registerDialAddr string, registerXToken string, r
 			Transport: transport,
 		},
 	}
+}
+
+func targetKindFromRegisterURL(registerURL *url.URL) string {
+	if registerURL == nil {
+		return shared.TargetKindUnknown
+	}
+	kind, err := shared.NormalizeTargetKind(registerURL.Query().Get("target_kind"))
+	if err != nil {
+		return shared.TargetKindUnknown
+	}
+	return kind
+}
+
+func proxyModeFromRegisterURL(registerURL *url.URL) string {
+	if registerURL == nil {
+		return shared.ProxyModeLegacyFramed
+	}
+	mode, err := shared.NormalizeProxyMode(registerURL.Query().Get("proxy_mode"))
+	if err != nil {
+		return shared.ProxyModeLegacyFramed
+	}
+	return mode
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
@@ -150,17 +179,28 @@ func (a *Agent) Run(ctx context.Context) error {
 
 		// Reset backoff after a successful connect.
 		attempt = 0
+		negotiatedProxyMode := negotiatedProxyModeFromHandshake(resp, shared.ProxyModeLegacyFramed)
+		if negotiatedProxyMode != a.registerProxyMode {
+			log.Printf(
+				"[clockbridge-cli] proxy mode negotiated requested=%s effective=%s",
+				a.registerProxyMode,
+				negotiatedProxyMode,
+			)
+		}
 
 		s := &connState{
-			a:       a,
-			ws:      ws,
-			streams: make(map[uint32]*stream),
+			a:         a,
+			ws:        ws,
+			proxyMode: negotiatedProxyMode,
+			streams:   make(map[uint32]*stream),
 		}
 
 		log.Printf(
-			"[clockbridge-cli] connected register_url=%s target=%s local=%s remote=%s handshake={%s}",
+			"[clockbridge-cli] connected register_url=%s target=%s requested_mode=%s effective_mode=%s local=%s remote=%s handshake={%s}",
 			a.registerURL.String(),
 			a.targetBase.String(),
+			a.registerProxyMode,
+			negotiatedProxyMode,
 			connAddrLocal(ws),
 			connAddrRemote(ws),
 			handshakeSummary(resp),
@@ -279,6 +319,30 @@ func handshakeSummary(resp *http.Response) string {
 		return fmt.Sprintf("status=%s body=%q", status, bodySnippet)
 	}
 	return fmt.Sprintf("status=%s location=%q body=%q", status, location, bodySnippet)
+}
+
+func negotiatedProxyModeFromHandshake(resp *http.Response, fallback string) string {
+	if strings.TrimSpace(fallback) == "" {
+		fallback = shared.ProxyModeLegacyFramed
+	}
+	if resp == nil {
+		return fallback
+	}
+	raw := strings.TrimSpace(resp.Header.Get(shared.HeaderProxyMode))
+	if raw == "" {
+		return fallback
+	}
+	mode, err := shared.NormalizeProxyMode(raw)
+	if err != nil {
+		log.Printf(
+			"[clockbridge-cli] ignore invalid handshake proxy mode header=%q fallback=%s err=%v",
+			raw,
+			fallback,
+			err,
+		)
+		return fallback
+	}
+	return mode
 }
 
 func (s *connState) run(ctx context.Context) error {
@@ -438,7 +502,16 @@ func (s *connState) handleStream(ctx context.Context, st *stream) {
 	}
 
 	if rs.IsWebSocket {
+		if s.proxyMode == shared.ProxyModeTransparentTunnel {
+			s.handleWebSocketTransparent(ctx, st, rs)
+			return
+		}
 		s.handleWebSocket(ctx, st, rs)
+		return
+	}
+	if isTCPTarget(s.a.targetBase) {
+		log.Printf("[clockbridge-cli] tcp target does not support plain HTTP stream=%d path=%s", st.id, rs.Path)
+		_ = s.send(proto.TRst, st.id, []byte("tcp target only supports websocket upgrade"))
 		return
 	}
 	s.handleHTTP(ctx, st, rs)
@@ -584,7 +657,41 @@ func (s *connState) handleHTTP(ctx context.Context, st *stream, rs proto.ReqStar
 	<-bodyClosed
 }
 
+func (s *connState) handleWebSocketTransparent(ctx context.Context, st *stream, rs proto.ReqStart) {
+	if isTCPTarget(s.a.targetBase) {
+		s.handleWebSocketToTCPTransparent(ctx, st, rs)
+		return
+	}
+	if isWebSocketTarget(s.a.targetBase) {
+		if !shouldUseRawTransparentWS(s.a.registerTargetKind) {
+			// Backward compatibility/safety: if register target_kind does not explicitly indicate ws,
+			// keep using framed relay to stay aligned with gateway selection.
+			log.Printf(
+				"[clockbridge-cli] transparent ws raw relay disabled due to target_kind=%s stream=%d target=%s",
+				s.a.registerTargetKind,
+				st.id,
+				s.a.targetBase.String(),
+			)
+			s.handleWebSocket(ctx, st, rs)
+			return
+		}
+		s.handleWebSocketToWSTransparent(ctx, st, rs)
+		return
+	}
+	log.Printf(
+		"[clockbridge-cli] transparent mode unsupported target stream=%d target=%s",
+		st.id,
+		s.a.targetBase.String(),
+	)
+	_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: "transparent mode supports only tcp/ws/wss target"}))
+}
+
 func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.ReqStart) {
+	if isTCPTarget(s.a.targetBase) {
+		s.handleWebSocketToTCP(ctx, st, rs)
+		return
+	}
+
 	targetHTTP := shared.JoinURL(s.a.targetBase, rs.Path)
 	targetHTTP.RawQuery = rs.RawQuery
 	targetWS := shared.ToWebSocketURL(targetHTTP)
@@ -606,7 +713,10 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 	defer func() { _ = wsUp.Close() }()
 
 	sub := wsUp.Subprotocol()
-	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{Subprotocol: sub})); err != nil {
+	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{
+		Subprotocol: sub,
+		RelayMode:   proto.WsRelayModeFramed,
+	})); err != nil {
 		return
 	}
 
@@ -673,6 +783,385 @@ func (s *connState) handleWebSocket(ctx context.Context, st *stream, rs proto.Re
 				return
 			case proto.TRst:
 				log.Printf("[clockbridge-cli] gateway reset websocket stream=%d", st.id)
+				return
+			}
+		}
+	}
+}
+
+func isTCPTarget(target *url.URL) bool {
+	if target == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(target.Scheme), "tcp")
+}
+
+func isWebSocketTarget(target *url.URL) bool {
+	if target == nil {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(target.Scheme))
+	return scheme == "ws" || scheme == "wss"
+}
+
+func shouldUseRawTransparentWS(registerTargetKind string) bool {
+	return strings.EqualFold(strings.TrimSpace(registerTargetKind), shared.TargetKindWebSocket)
+}
+
+func dialWebSocketUpstreamRaw(ctx context.Context, targetWS *url.URL, rs proto.ReqStart) (net.Conn, *bufio.Reader, string, []string, error) {
+	if targetWS == nil {
+		return nil, nil, "", nil, errors.New("invalid websocket target: nil")
+	}
+	addr := strings.TrimSpace(targetWS.Host)
+	if addr == "" {
+		return nil, nil, "", nil, errors.New("invalid websocket target: empty host")
+	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	var (
+		conn net.Conn
+		err  error
+	)
+	switch strings.ToLower(strings.TrimSpace(targetWS.Scheme)) {
+	case "ws":
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	case "wss":
+		tlsDialer := &tls.Dialer{
+			NetDialer: dialer,
+			Config: &tls.Config{
+				ServerName: targetWS.Hostname(),
+			},
+		}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
+	default:
+		return nil, nil, "", nil, fmt.Errorf("unsupported websocket scheme %q", targetWS.Scheme)
+	}
+	if err != nil {
+		return nil, nil, "", nil, err
+	}
+
+	hostHeader := strings.TrimSpace(rs.Host)
+	if hostHeader == "" {
+		hostHeader = targetWS.Host
+	}
+	method := strings.TrimSpace(rs.Method)
+	if method == "" {
+		method = http.MethodGet
+	}
+	requestURI := targetWS.RequestURI()
+	if requestURI == "" {
+		requestURI = "/"
+	}
+
+	bw := bufio.NewWriter(conn)
+	if _, err := fmt.Fprintf(bw, "%s %s HTTP/1.1\r\n", method, requestURI); err != nil {
+		_ = conn.Close()
+		return nil, nil, "", nil, err
+	}
+	if _, err := fmt.Fprintf(bw, "Host: %s\r\n", hostHeader); err != nil {
+		_ = conn.Close()
+		return nil, nil, "", nil, err
+	}
+	for k, vv := range http.Header(rs.Header) {
+		if strings.EqualFold(k, "Host") {
+			continue
+		}
+		ck := textproto.CanonicalMIMEHeaderKey(k)
+		for _, v := range vv {
+			if _, err := fmt.Fprintf(bw, "%s: %s\r\n", ck, v); err != nil {
+				_ = conn.Close()
+				return nil, nil, "", nil, err
+			}
+		}
+	}
+	if _, err := bw.WriteString("\r\n"); err != nil {
+		_ = conn.Close()
+		return nil, nil, "", nil, err
+	}
+	if err := bw.Flush(); err != nil {
+		_ = conn.Close()
+		return nil, nil, "", nil, err
+	}
+
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: method})
+	if err != nil {
+		_ = conn.Close()
+		return nil, nil, "", nil, err
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		_ = resp.Body.Close()
+		_ = conn.Close()
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return nil, nil, "", nil, fmt.Errorf("upstream handshake failed: %s", msg)
+	}
+	_ = resp.Body.Close()
+	subprotocol := strings.TrimSpace(resp.Header.Get("Sec-WebSocket-Protocol"))
+	extensions := append([]string(nil), resp.Header.Values("Sec-WebSocket-Extensions")...)
+	return conn, br, subprotocol, extensions, nil
+}
+
+func (s *connState) handleWebSocketToWSTransparent(ctx context.Context, st *stream, rs proto.ReqStart) {
+	targetWS := shared.JoinURL(s.a.targetBase, rs.Path)
+	targetWS.RawQuery = rs.RawQuery
+
+	upConn, upReader, subprotocol, extensions, err := dialWebSocketUpstreamRaw(ctx, targetWS, rs)
+	if err != nil {
+		log.Printf("[clockbridge-cli] upstream transparent websocket dial failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
+		return
+	}
+	defer func() { _ = upConn.Close() }()
+
+	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{
+		Subprotocol: subprotocol,
+		RelayMode:   proto.WsRelayModeRaw,
+		Extensions:  extensions,
+	})); err != nil {
+		return
+	}
+
+	var closeOnce sync.Once
+	closeStream := func(reason string) {
+		closeOnce.Do(func() {
+			_ = s.send(proto.TRst, st.id, []byte(reason))
+			st.close()
+		})
+	}
+
+	go func() {
+		if buffered := upReader.Buffered(); buffered > 0 {
+			buf := make([]byte, buffered)
+			if _, err := io.ReadFull(upReader, buf); err != nil {
+				closeStream("raw upstream buffered read failed")
+				return
+			}
+			if err := s.send(proto.TWsA2C, st.id, buf); err != nil {
+				return
+			}
+		}
+
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := upConn.Read(buf)
+			if n > 0 {
+				payload := make([]byte, n)
+				copy(payload, buf[:n])
+				if err2 := s.send(proto.TWsA2C, st.id, payload); err2 != nil {
+					return
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+					closeStream("raw upstream closed")
+				} else {
+					log.Printf("[clockbridge-cli] upstream transparent websocket read failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
+					closeStream("raw upstream read failed")
+				}
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-st.closed:
+			return
+		case <-ctx.Done():
+			return
+		case f := <-st.rx:
+			switch f.Type {
+			case proto.TWsC2A:
+				if len(f.Payload) == 0 {
+					continue
+				}
+				if _, err := upConn.Write(f.Payload); err != nil {
+					log.Printf("[clockbridge-cli] upstream transparent websocket write failed stream=%d target=%s err=%v", st.id, targetWS.String(), err)
+					closeStream("raw upstream write failed")
+					return
+				}
+			case proto.TWsClose, proto.TRst:
+				log.Printf("[clockbridge-cli] gateway closed websocket stream=%d (transparent ws raw)", st.id)
+				closeStream("gateway closed stream")
+				return
+			}
+		}
+	}
+}
+
+func (s *connState) handleWebSocketToTCPTransparent(ctx context.Context, st *stream, _ proto.ReqStart) {
+	dialAddr := strings.TrimSpace(s.a.targetBase.Host)
+	if dialAddr == "" {
+		log.Printf("[clockbridge-cli] upstream tcp target host is empty stream=%d", st.id)
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: "invalid tcp target: empty host"}))
+		return
+	}
+	tcpConn, err := (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", dialAddr)
+	if err != nil {
+		log.Printf("[clockbridge-cli] upstream tcp dial failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
+		return
+	}
+	defer func() { _ = tcpConn.Close() }()
+
+	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{
+		RelayMode: proto.WsRelayModeFramed,
+	})); err != nil {
+		return
+	}
+
+	var closeOnce sync.Once
+	sendCloseToGateway := func(code int, reason string) {
+		closeOnce.Do(func() {
+			_ = s.send(proto.TWsClose, st.id, proto.MustJSON(proto.WsClose{Code: code, Reason: reason}))
+			st.close()
+		})
+	}
+
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := tcpConn.Read(buf)
+			if n > 0 {
+				payload := make([]byte, 1+n)
+				payload[0] = byte(websocket.BinaryMessage)
+				copy(payload[1:], buf[:n])
+				if err2 := s.send(proto.TWsA2C, st.id, payload); err2 != nil {
+					return
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					sendCloseToGateway(websocket.CloseNormalClosure, "upstream tcp closed")
+				} else if errors.Is(err, net.ErrClosed) {
+					return
+				} else {
+					log.Printf("[clockbridge-cli] upstream tcp read failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+					sendCloseToGateway(websocket.CloseGoingAway, "upstream tcp read failed")
+				}
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-st.closed:
+			return
+		case <-ctx.Done():
+			return
+		case f := <-st.rx:
+			switch f.Type {
+			case proto.TWsC2A:
+				if len(f.Payload) <= 1 {
+					continue
+				}
+				if _, err := tcpConn.Write(f.Payload[1:]); err != nil {
+					log.Printf("[clockbridge-cli] upstream tcp write failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+					sendCloseToGateway(websocket.CloseGoingAway, "upstream tcp write failed")
+					return
+				}
+			case proto.TWsClose:
+				var c proto.WsClose
+				_ = json.Unmarshal(f.Payload, &c)
+				code := shared.SanitizeCloseCode(c.Code)
+				reason := c.Reason
+				log.Printf("[clockbridge-cli] gateway websocket close (transparent tcp) stream=%d code=%d reason=%q", st.id, code, reason)
+				return
+			case proto.TRst:
+				log.Printf("[clockbridge-cli] gateway reset websocket stream=%d (transparent tcp)", st.id)
+				return
+			}
+		}
+	}
+}
+
+func (s *connState) handleWebSocketToTCP(ctx context.Context, st *stream, rs proto.ReqStart) {
+	dialAddr := strings.TrimSpace(s.a.targetBase.Host)
+	if dialAddr == "" {
+		log.Printf("[clockbridge-cli] upstream tcp target host is empty stream=%d", st.id)
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: "invalid tcp target: empty host"}))
+		return
+	}
+	tcpConn, err := (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, "tcp", dialAddr)
+	if err != nil {
+		log.Printf("[clockbridge-cli] upstream tcp dial failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+		_ = s.send(proto.TWsOpenErr, st.id, proto.MustJSON(proto.WsOpenErr{Message: err.Error()}))
+		return
+	}
+	defer func() { _ = tcpConn.Close() }()
+
+	if err := s.send(proto.TWsOpenOK, st.id, proto.MustJSON(proto.WsOpenOK{
+		RelayMode: proto.WsRelayModeFramed,
+	})); err != nil {
+		return
+	}
+
+	var closeOnce sync.Once
+	sendCloseToGateway := func(code int, reason string) {
+		closeOnce.Do(func() {
+			_ = s.send(proto.TWsClose, st.id, proto.MustJSON(proto.WsClose{Code: code, Reason: reason}))
+			st.close()
+		})
+	}
+
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := tcpConn.Read(buf)
+			if n > 0 {
+				payload := make([]byte, 1+n)
+				payload[0] = byte(websocket.BinaryMessage)
+				copy(payload[1:], buf[:n])
+				if err2 := s.send(proto.TWsA2C, st.id, payload); err2 != nil {
+					return
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					sendCloseToGateway(websocket.CloseNormalClosure, "upstream tcp closed")
+				} else if errors.Is(err, net.ErrClosed) {
+					// Closed by local teardown path (client closed/reset).
+					return
+				} else {
+					log.Printf("[clockbridge-cli] upstream tcp read failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+					sendCloseToGateway(websocket.CloseGoingAway, "upstream tcp read failed")
+				}
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-st.closed:
+			return
+		case <-ctx.Done():
+			return
+		case f := <-st.rx:
+			switch f.Type {
+			case proto.TWsC2A:
+				if len(f.Payload) <= 1 {
+					continue
+				}
+				if _, err := tcpConn.Write(f.Payload[1:]); err != nil {
+					log.Printf("[clockbridge-cli] upstream tcp write failed stream=%d target=%s err=%v", st.id, dialAddr, err)
+					sendCloseToGateway(websocket.CloseGoingAway, "upstream tcp write failed")
+					return
+				}
+			case proto.TWsClose:
+				var c proto.WsClose
+				_ = json.Unmarshal(f.Payload, &c)
+				code := shared.SanitizeCloseCode(c.Code)
+				reason := c.Reason
+				log.Printf("[clockbridge-cli] gateway websocket close (tcp upstream) stream=%d code=%d reason=%q", st.id, code, reason)
+				return
+			case proto.TRst:
+				log.Printf("[clockbridge-cli] gateway reset websocket stream=%d (tcp upstream)", st.id)
 				return
 			}
 		}
