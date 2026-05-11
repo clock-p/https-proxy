@@ -1,5 +1,7 @@
 bin/
 dist/
+.gocache/
+.gopath/
 *.tar.gz
 *.sha256
 *.tmp

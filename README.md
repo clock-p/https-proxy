@@ -8,6 +8,7 @@
 - Agent 通过 WebSocket（ws/wss）注册到 Gateway，维持长连接
 - Client 通过 `https://<DOMAIN>/https-proxy/<UUID>/...` 访问
 - HTTP 全量透传：支持 WebSocket Upgrade、流式响应、大文件传输、Trailers
+- 浏览器 WebSocket 无法自定义 `Authorization` 请求头；Gateway 支持把 client URL 上的 `access_token` / `authorization` / `token` 查询参数映射为上游 `Authorization: Bearer <token>`，并在转发前从 query 中移除。
 
 ## 本地最小联调（不依赖 Nginx）
 
@@ -44,6 +45,13 @@ go run ./cmd/mockclient --base http://127.0.0.1:18080/u1 --mode resp-trailer
 go run ./cmd/mockclient --base http://127.0.0.1:18080/u1 --mode req-trailer
 go run ./cmd/mockclient --base http://127.0.0.1:18080/u1 --mode interim
 go run ./cmd/mockclient --base http://127.0.0.1:18080/u1 --mode big-post --size $((50*1024*1024))
+```
+
+浏览器直连 WS 可使用 query token：
+
+```text
+wss://<uuid>.example.com/ws?access_token=<TOKEN>
+wss://<uuid>.example.com/ws?authorization=Bearer%20<TOKEN>
 ```
 
 ## 接入 Nginx（线上域名）

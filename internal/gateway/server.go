@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -323,6 +324,8 @@ func (s *Server) handleClientHTTP(w http.ResponseWriter, r *http.Request, agent 
 
 	headers := r.Header.Clone()
 	stripForwardingIPHeaders(headers)
+	rawQuery := r.URL.RawQuery
+	applyQueryBearerAuth(headers, &rawQuery)
 	trailerKeys := shared.TrailerKeysFromHeader(headers)
 	if len(trailerKeys) == 0 && len(r.Trailer) > 0 {
 		trailerKeys = shared.HeaderKeys(r.Trailer)
@@ -332,7 +335,7 @@ func (s *Server) handleClientHTTP(w http.ResponseWriter, r *http.Request, agent 
 	reqStart := proto.ReqStart{
 		Method:      r.Method,
 		Path:        suffixPath,
-		RawQuery:    r.URL.RawQuery,
+		RawQuery:    rawQuery,
 		Host:        r.Host,
 		Header:      headers,
 		TrailerKeys: trailerKeys,
@@ -468,11 +471,13 @@ func (s *Server) handleClientWebSocket(w http.ResponseWriter, r *http.Request, a
 
 	wsHeaders := r.Header.Clone()
 	stripForwardingIPHeaders(wsHeaders)
+	rawQuery := r.URL.RawQuery
+	applyQueryBearerAuth(wsHeaders, &rawQuery)
 
 	reqStart := proto.ReqStart{
 		Method:      r.Method,
 		Path:        suffixPath,
-		RawQuery:    r.URL.RawQuery,
+		RawQuery:    rawQuery,
 		Host:        r.Host,
 		Header:      wsHeaders,
 		IsWebSocket: true,
@@ -644,6 +649,48 @@ func setTrailerKeys(h http.Header, keys []string) {
 func stripForwardingIPHeaders(h http.Header) {
 	h.Del("X-Forwarded-For")
 	h.Del("Forwarded")
+}
+
+func applyQueryBearerAuth(h http.Header, rawQuery *string) {
+	if rawQuery == nil || strings.TrimSpace(*rawQuery) == "" {
+		return
+	}
+	q, err := url.ParseQuery(*rawQuery)
+	if err != nil {
+		return
+	}
+
+	auth := strings.TrimSpace(firstQueryValue(q, "authorization"))
+	if auth == "" {
+		if token := strings.TrimSpace(firstQueryValue(q, "access_token")); token != "" {
+			auth = "Bearer " + token
+		}
+	}
+	if auth == "" {
+		if token := strings.TrimSpace(firstQueryValue(q, "token")); token != "" {
+			auth = "Bearer " + token
+		}
+	}
+	if auth != "" {
+		if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			auth = "Bearer " + auth
+		}
+		h.Set("Authorization", auth)
+	}
+
+	q.Del("authorization")
+	q.Del("access_token")
+	q.Del("token")
+	*rawQuery = q.Encode()
+}
+
+func firstQueryValue(q url.Values, key string) string {
+	for _, v := range q[key] {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 type logResponseWriter struct {
