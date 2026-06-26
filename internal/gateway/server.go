@@ -294,12 +294,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyModesRequested := make(map[string]string, len(s.agentByUUID))
 		proxyModeReasons := make(map[string]string, len(s.agentByUUID))
 		targetKinds := make(map[string]string, len(s.agentByUUID))
+		activeStreams := make(map[string]int, len(s.agentByUUID))
+		agentAgesSeconds := make(map[string]int64, len(s.agentByUUID))
+		agentIdleSeconds := make(map[string]int64, len(s.agentByUUID))
+		now := time.Now()
 		for k, agent := range s.agentByUUID {
 			uuids = append(uuids, k)
 			proxyModes[k] = agent.proxyModeEffective
 			proxyModesRequested[k] = agent.proxyModeRequested
 			proxyModeReasons[k] = agent.proxyModeReason
 			targetKinds[k] = agent.targetKind
+			activeStreams[k] = agent.activeStreamCount()
+			agentAgesSeconds[k] = int64(now.Sub(agent.bornAt).Seconds())
+			agentIdleSeconds[k] = int64(agent.idleFor().Seconds())
 		}
 		s.mu.unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -310,6 +317,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"proxy_modes_requested": proxyModesRequested,
 			"proxy_mode_reasons":    proxyModeReasons,
 			"target_kinds":          targetKinds,
+			"active_streams":        activeStreams,
+			"agent_age_seconds":     agentAgesSeconds,
+			"agent_idle_seconds":    agentIdleSeconds,
 			"proxy_mode_policy": map[string]any{
 				"transparent_enabled": s.transparentEnabled,
 				"force_legacy_mode":   s.forceLegacyMode,

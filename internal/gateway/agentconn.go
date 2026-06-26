@@ -96,6 +96,12 @@ func (c *agentConn) idleFor() time.Duration {
 	return idle
 }
 
+func (c *agentConn) activeStreamCount() int {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	return len(c.streams)
+}
+
 func (c *agentConn) closeReason() string {
 	v := c.closeReasonVal.Load()
 	if s, ok := v.(string); ok && s != "" {
