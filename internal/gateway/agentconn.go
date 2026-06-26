@@ -68,12 +68,18 @@ func (c *agentConn) closeWithErr(err error) {
 		}
 		c.closeReasonVal.Store(reason)
 		close(c.closedCh)
+
 		c.streamMu.Lock()
+		streams := make([]*stream, 0, len(c.streams))
 		for _, s := range c.streams {
-			s.closeWithErr(errors.New("agent disconnected"))
+			streams = append(streams, s)
 		}
 		c.streams = make(map[uint32]*stream)
 		c.streamMu.Unlock()
+
+		for _, s := range streams {
+			s.closeWithErr(errors.New("agent disconnected"))
+		}
 	})
 }
 
@@ -101,6 +107,11 @@ func (c *agentConn) closeReason() string {
 func (c *agentConn) newStream() (*stream, error) {
 	c.streamMu.Lock()
 	defer c.streamMu.Unlock()
+	select {
+	case <-c.closedCh:
+		return nil, errors.New("agent disconnected")
+	default:
+	}
 	if c.maxStreams > 0 && len(c.streams) >= c.maxStreams {
 		return nil, errors.New("too many streams")
 	}
