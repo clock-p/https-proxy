@@ -1,10 +1,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/clock-p/clockbridge/internal/shared"
 )
@@ -83,6 +86,25 @@ func TestStatusIncludesAgentDiagnostics(t *testing.T) {
 	assertNestedNumber(t, payload, "active_streams", "diag", 1)
 	assertNestedNumber(t, payload, "agent_age_seconds", "diag", 0)
 	assertNestedNumber(t, payload, "agent_idle_seconds", "diag", 0)
+}
+
+func TestClientWSPingLoopCancelsOnPingFailure(t *testing.T) {
+	clientConn, peerConn := newTestWebSocketPair(t)
+	defer peerConn.Close()
+	_ = clientConn.Close()
+
+	s := &Server{clientWSPingInterval: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var writeMu sync.Mutex
+	s.startClientWSPingLoop(ctx, cancel, clientConn, &writeMu, "uuid", "/ws")
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("ping loop did not cancel context after websocket write failure")
+	}
 }
 
 func assertNestedNumber(t *testing.T, payload map[string]any, key string, nestedKey string, want float64) {

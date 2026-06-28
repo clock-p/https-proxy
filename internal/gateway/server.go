@@ -190,11 +190,20 @@ func envDuration(key string, def time.Duration) time.Duration {
 	return def
 }
 
-func (s *Server) startClientWSPingLoop(ctx context.Context, wsClient *websocket.Conn, writeMu *sync.Mutex, uuid string, path string) {
+func (s *Server) startClientWSPingLoop(ctx context.Context, cancel context.CancelFunc, wsClient *websocket.Conn, writeMu *sync.Mutex, uuid string, path string) {
 	interval := s.clientWSPingInterval
 	if interval <= 0 {
 		return
 	}
+	pongWait := interval*2 + 5*time.Second
+	_ = wsClient.SetReadDeadline(time.Now().Add(pongWait))
+	wsClient.SetPongHandler(func(appData string) error {
+		_ = wsClient.SetReadDeadline(time.Now().Add(pongWait))
+		if s.clientWSPingDebug {
+			log.Printf("[clockbridge-gateway] ws client pong received uuid=%s path=%s payload=%q", uuid, path, appData)
+		}
+		return nil
+	})
 	if s.clientWSPingDebug {
 		log.Printf("[clockbridge-gateway] ws client ping loop start uuid=%s path=%s interval=%s", uuid, path, interval)
 	}
@@ -215,6 +224,8 @@ func (s *Server) startClientWSPingLoop(ctx context.Context, wsClient *websocket.
 				writeMu.Unlock()
 				if err != nil {
 					log.Printf("[clockbridge-gateway] ws client ping failed uuid=%s path=%s err=%v", uuid, path, err)
+					cancel()
+					_ = wsClient.Close()
 					return
 				}
 				if s.clientWSPingDebug {
@@ -757,7 +768,7 @@ func (s *Server) handleClientWebSocket(w http.ResponseWriter, r *http.Request, a
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	var wsWriteMu sync.Mutex
-	s.startClientWSPingLoop(ctx, wsClient, &wsWriteMu, agent.uuid, r.URL.Path)
+	s.startClientWSPingLoop(ctx, cancel, wsClient, &wsWriteMu, agent.uuid, r.URL.Path)
 
 	var closeOnce sync.Once
 	var closeDone atomic.Bool
@@ -927,7 +938,7 @@ func (s *Server) handleClientWebSocketTransparent(w http.ResponseWriter, r *http
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	var wsWriteMu sync.Mutex
-	s.startClientWSPingLoop(ctx, wsClient, &wsWriteMu, agent.uuid, r.URL.Path)
+	s.startClientWSPingLoop(ctx, cancel, wsClient, &wsWriteMu, agent.uuid, r.URL.Path)
 
 	var closeOnce sync.Once
 	var closeDone atomic.Bool
