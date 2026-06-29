@@ -7,17 +7,14 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 
-	"github.com/clock-p/clockbridge/internal/agent"
 	"github.com/clock-p/clockbridge/internal/reverseproxy"
-	"github.com/clock-p/clockbridge/internal/shared"
+	"github.com/clock-p/clockbridge/pkg/clockbridge"
 )
 
 var version = "dev"
@@ -33,7 +30,7 @@ const (
 func main() {
 	localSpec := flag.String("L", "", "local forward ([bind_addr:]port)，例如 127.0.0.1:28789")
 	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/ 或 tcp://127.0.0.1:22")
-	proxyMode := flag.String("proxy-mode", shared.ProxyModeLegacyFramed, "register proxy mode: legacy_framed|transparent_tunnel")
+	proxyMode := flag.String("proxy-mode", clockbridge.ProxyModeLegacyFramed, "register proxy mode: legacy_framed|transparent_tunnel")
 	registerIP := flag.String("register-ip", "", "register connect override: ip/ip:port/hostname[:port]（仅覆盖 TCP 连接，Host/SNI 仍用 register host）")
 	identityFile := flag.String("i", "", "identity file（Bearer token 文件，ssh 风格）")
 	bearerTokenFlag := flag.String("token", "", "Bearer token（调试用，可选）")
@@ -156,26 +153,19 @@ func runRemoteForward(
 	if len(args) != 1 {
 		return errors.New("remote forward (-R) expects exactly one destination argument: <uuid>@<register_host>")
 	}
-	normalizedProxyMode, err := parseProxyMode(proxyMode)
-	if err != nil {
-		return err
-	}
-	target, err := parseRemoteTargetURL(remoteTarget, "remote target URL")
-	if err != nil {
-		return err
-	}
-	if err := validateProxyModeTarget(normalizedProxyMode, target); err != nil {
-		return err
-	}
 	uuid, registerHost, err := parseDestination(args[0])
 	if err != nil {
 		return err
 	}
-	registerURL, err := buildRegisterURL(registerHost, uuid, normalizedProxyMode, targetKindFromTargetURL(target))
-	if err != nil {
-		return err
-	}
-	registerDialAddr, err := resolveRegisterDialAddr(registerIP, registerURL)
+	forward, err := clockbridge.NewRemoteForward(clockbridge.RemoteForwardConfig{
+		TargetURL:           remoteTarget,
+		UUID:                uuid,
+		RegisterHost:        registerHost,
+		RegisterIP:          registerIP,
+		ProxyMode:           proxyMode,
+		RegisterXToken:      strings.TrimSpace(xToken),
+		RegisterBearerToken: bearerToken,
+	})
 	if err != nil {
 		return err
 	}
@@ -190,19 +180,15 @@ func runRemoteForward(
 			log.Printf("[clockbridge-cli] register Authorization bearer: enabled source=%s", bearerSource)
 		}
 	}
-	if registerDialAddr != "" {
+	if forward.RegisterDialAddr() != "" {
 		log.Printf(
 			"[clockbridge-cli] register dial override: connect=%s host_sni=%s",
-			registerDialAddr,
-			registerURL.Hostname(),
+			forward.RegisterDialAddr(),
+			forward.RegisterURL().Hostname(),
 		)
 	}
 
-	a := agent.New(registerURL, registerDialAddr, strings.TrimSpace(xToken), bearerToken, target)
-	if err := a.Run(ctx); err != nil && err != context.Canceled {
-		return fmt.Errorf("agent exit: %w", err)
-	}
-	return nil
+	return forward.Run(ctx)
 }
 
 func parseListenAddr(raw string) (string, error) {
@@ -241,91 +227,23 @@ func parseDestination(raw string) (uuid string, registerHost string, err error) 
 }
 
 func buildRegisterURL(registerHost, uuid string, proxyMode string, targetKind string) (*url.URL, error) {
-	raw := strings.TrimSpace(registerHost)
-	if raw == "" {
-		return nil, errors.New("register host is empty")
-	}
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid register host %q: %w", registerHost, err)
-	}
-	switch strings.ToLower(strings.TrimSpace(u.Scheme)) {
-	case "https":
-		u.Scheme = "wss"
-	case "http":
-		u.Scheme = "ws"
-	case "wss", "ws":
-		// keep as-is
-	default:
-		return nil, fmt.Errorf("unsupported register scheme %q", u.Scheme)
-	}
-	if strings.TrimSpace(u.Host) == "" {
-		return nil, fmt.Errorf("invalid register host %q: missing host", registerHost)
-	}
-	if u.Path == "" || u.Path == "/" {
-		u.Path = "/register"
-	}
-	q := u.Query()
-	q.Set("uuid", uuid)
-	if strings.TrimSpace(proxyMode) != "" {
-		q.Set("proxy_mode", proxyMode)
-	}
-	normalizedTargetKind, err := shared.NormalizeTargetKind(targetKind)
-	if err != nil {
-		return nil, fmt.Errorf("invalid target kind %q: %w", targetKind, err)
-	}
-	if normalizedTargetKind != shared.TargetKindUnknown {
-		q.Set("target_kind", normalizedTargetKind)
-	}
-	u.RawQuery = q.Encode()
-	return u, nil
+	return clockbridge.BuildRegisterURL(registerHost, uuid, proxyMode, targetKind)
 }
 
 func targetKindFromTargetURL(target *url.URL) string {
-	if target == nil {
-		return shared.TargetKindUnknown
-	}
-	switch strings.ToLower(strings.TrimSpace(target.Scheme)) {
-	case "http", "https":
-		return shared.TargetKindHTTP
-	case "tcp":
-		return shared.TargetKindTCP
-	case "ws", "wss":
-		return shared.TargetKindWebSocket
-	default:
-		return shared.TargetKindUnknown
-	}
+	return clockbridge.TargetKindFromTargetURL(target)
 }
 
 func parseProxyMode(raw string) (string, error) {
-	value, err := shared.NormalizeProxyMode(raw)
-	if err != nil {
-		return "", fmt.Errorf("invalid --proxy-mode: %w", err)
-	}
-	return value, nil
+	return clockbridge.ParseProxyMode(raw)
 }
 
 func validateProxyModeTarget(proxyMode string, target *url.URL) error {
-	if proxyMode != shared.ProxyModeTransparentTunnel {
-		return nil
-	}
-	if target == nil {
-		return errors.New("--proxy-mode transparent_tunnel requires -R tcp://host:port or ws(s)://host[:port]/... target")
-	}
-	scheme := strings.ToLower(strings.TrimSpace(target.Scheme))
-	if scheme != "tcp" && scheme != "ws" && scheme != "wss" {
-		return errors.New("--proxy-mode transparent_tunnel currently supports only tcp:// or ws(s):// targets")
-	}
-	return nil
+	return clockbridge.ValidateProxyModeTarget(proxyMode, target)
 }
 
 func resolveRegisterDialAddr(raw string, registerURL *url.URL) (string, error) {
-	return resolveRegisterDialAddrWithLookup(raw, registerURL, func(ctx context.Context, host string) ([]net.IPAddr, error) {
-		return net.DefaultResolver.LookupIPAddr(ctx, host)
-	})
+	return clockbridge.ResolveRegisterDialAddr(raw, registerURL)
 }
 
 func resolveRegisterDialAddrWithLookup(
@@ -333,100 +251,11 @@ func resolveRegisterDialAddrWithLookup(
 	registerURL *url.URL,
 	lookup func(context.Context, string) ([]net.IPAddr, error),
 ) (string, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return "", nil
-	}
-
-	if strings.Contains(value, "://") {
-		return "", fmt.Errorf("invalid --register-ip %q: scheme is not allowed", raw)
-	}
-
-	defaultPort := registerURL.Port()
-	if defaultPort == "" {
-		switch strings.ToLower(strings.TrimSpace(registerURL.Scheme)) {
-		case "wss", "https":
-			defaultPort = "443"
-		case "ws", "http":
-			defaultPort = "80"
-		default:
-			return "", fmt.Errorf("invalid register URL scheme %q for --register-ip", registerURL.Scheme)
-		}
-	}
-
-	if ip, err := netip.ParseAddr(value); err == nil {
-		return net.JoinHostPort(ip.String(), defaultPort), nil
-	}
-
-	host := value
-	port := defaultPort
-	if splitHost, splitPort, err := net.SplitHostPort(value); err == nil {
-		host = strings.TrimSpace(splitHost)
-		port = strings.TrimSpace(splitPort)
-	} else if addrErr, ok := err.(*net.AddrError); !ok || !strings.Contains(strings.ToLower(addrErr.Err), "missing port") {
-		return "", fmt.Errorf("invalid --register-ip %q, expected ip, ip:port or hostname[:port]", raw)
-	}
-
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "", fmt.Errorf("invalid --register-ip %q, expected ip, ip:port or hostname[:port]", raw)
-	}
-
-	port = strings.TrimSpace(port)
-	portNum, err := strconv.Atoi(port)
-	if err != nil || portNum < 1 || portNum > 65535 {
-		return "", fmt.Errorf("invalid --register-ip port %q", port)
-	}
-
-	if ip, err := netip.ParseAddr(host); err == nil {
-		return net.JoinHostPort(ip.String(), port), nil
-	}
-
-	if lookup == nil {
-		return "", errors.New("internal error: register ip resolver is nil")
-	}
-	resolved, err := lookup(context.Background(), host)
-	if err != nil {
-		return "", fmt.Errorf("resolve --register-ip host %q: %w", host, err)
-	}
-	for _, item := range resolved {
-		if ipv4 := item.IP.To4(); ipv4 != nil {
-			return net.JoinHostPort(ipv4.String(), port), nil
-		}
-	}
-	for _, item := range resolved {
-		if ipv6 := item.IP.To16(); ipv6 != nil {
-			return net.JoinHostPort(ipv6.String(), port), nil
-		}
-	}
-	return "", fmt.Errorf("resolve --register-ip host %q: no A/AAAA record", host)
+	return clockbridge.ResolveRegisterDialAddrWithLookup(raw, registerURL, lookup)
 }
 
 func parseRemoteTargetURL(raw string, field string) (*url.URL, error) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
-		return nil, fmt.Errorf("%s is empty", field)
-	}
-	u, err := url.Parse(value)
-	if err != nil {
-		return nil, fmt.Errorf("invalid %s %q: %w", field, raw, err)
-	}
-	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
-	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "ws" && scheme != "wss" {
-		return nil, fmt.Errorf("invalid %s %q: only http/https/tcp/ws/wss are supported", field, raw)
-	}
-	if strings.TrimSpace(u.Host) == "" {
-		return nil, fmt.Errorf("invalid %s %q: missing host", field, raw)
-	}
-	if scheme == "tcp" {
-		if strings.TrimSpace(u.Port()) == "" {
-			return nil, fmt.Errorf("invalid %s %q: tcp target requires explicit port", field, raw)
-		}
-		if u.Path != "" && u.Path != "/" {
-			return nil, fmt.Errorf("invalid %s %q: tcp target must not include path", field, raw)
-		}
-	}
-	return u, nil
+	return clockbridge.ParseRemoteTargetURL(raw, field)
 }
 
 func parseHTTPURL(raw string, field string) (*url.URL, error) {
