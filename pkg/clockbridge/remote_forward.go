@@ -25,6 +25,8 @@ const (
 )
 
 type RemoteForwardConfig struct {
+	// OnStatus 同步接收实际连接状态；回调应快速返回。
+	OnStatus            func(ForwardStatus)
 	TargetURL           string
 	UUID                string
 	RegisterHost        string
@@ -34,7 +36,10 @@ type RemoteForwardConfig struct {
 	RegisterBearerToken string
 }
 
+type ForwardStatus = agent.ConnectionStatus
+
 type RemoteForward struct {
+	onStatus            func(ForwardStatus)
 	registerURL         *url.URL
 	registerDialAddr    string
 	registerXToken      string
@@ -63,6 +68,7 @@ func NewRemoteForward(config RemoteForwardConfig) (*RemoteForward, error) {
 		return nil, err
 	}
 	return &RemoteForward{
+		onStatus:            config.OnStatus,
 		registerURL:         registerURL,
 		registerDialAddr:    registerDialAddr,
 		registerXToken:      strings.TrimSpace(config.RegisterXToken),
@@ -91,6 +97,7 @@ func (f *RemoteForward) Run(ctx context.Context) error {
 		return errors.New("clockbridge remote forward is nil")
 	}
 	a := agent.New(f.registerURL, f.registerDialAddr, f.registerXToken, f.registerBearerToken, f.target)
+	a.OnStatus = f.onStatus
 	if err := a.Run(ctx); err != nil && err != context.Canceled {
 		return fmt.Errorf("agent exit: %w", err)
 	}

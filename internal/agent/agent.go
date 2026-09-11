@@ -27,6 +27,8 @@ import (
 )
 
 type Agent struct {
+	// OnStatus 在连接循环内同步调用；接收者不能阻塞或修改回调中的快照。
+	OnStatus            func(ConnectionStatus)
 	registerURL         *url.URL
 	registerDialAddr    string
 	registerXToken      string
@@ -40,12 +42,22 @@ type Agent struct {
 	httpTransport *http.Transport
 }
 
+type ConnectionStatus struct {
+	State           string     `json:"state"`
+	Attempt         int        `json:"attempt"`
+	LastError       string     `json:"last_error,omitempty"`
+	LastConnectedAt *time.Time `json:"last_connected_at,omitempty"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
+	NextRetryAt     *time.Time `json:"next_retry_at,omitempty"`
+}
+
 type connState struct {
 	a *Agent
 
 	ws          *websocket.Conn
 	writeMu     sync.Mutex
 	lastPongLog time.Time
+	onPong      func()
 	proxyMode   string
 
 	streamMu sync.Mutex
@@ -134,11 +146,29 @@ func envDuration(key string, def time.Duration) time.Duration {
 func (a *Agent) Run(ctx context.Context) error {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	attempt := 0
+	status := ConnectionStatus{}
+	report := func(state string, err error, wait time.Duration) {
+		status.State, status.Attempt = state, attempt
+		status.LastError = ""
+		if err != nil {
+			status.LastError = err.Error()
+		}
+		status.NextRetryAt = nil
+		if wait > 0 {
+			next := time.Now().UTC().Add(wait)
+			status.NextRetryAt = &next
+		}
+		if a.OnStatus != nil {
+			a.OnStatus(status)
+		}
+	}
+	defer func() { report("stopped", nil, 0) }()
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		report("connecting", nil, 0)
 
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 		if a.registerDialAddr != "" {
@@ -159,6 +189,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err != nil {
 			attempt++
 			wait := reconnectBackoff(rnd, attempt)
+			report("backoff", err, wait)
 			if hs := handshakeSummary(resp); hs != "" {
 				log.Printf(
 					"[clockbridge-cli] dial failed (attempt=%d) register_url=%s err=%v handshake={%s}; retry in %s",
@@ -177,8 +208,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Reset backoff after a successful connect.
-		attempt = 0
+		// 握手成功不代表连接稳定，短暂连接不能清掉累计退避。
+		connectedAt := time.Now().UTC()
+		status.LastConnectedAt = &connectedAt
+		report("connected", nil, 0)
 		negotiatedProxyMode := negotiatedProxyModeFromHandshake(resp, shared.ProxyModeLegacyFramed)
 		if negotiatedProxyMode != a.registerProxyMode {
 			log.Printf(
@@ -193,6 +226,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			ws:        ws,
 			proxyMode: negotiatedProxyMode,
 			streams:   make(map[uint32]*stream),
+			onPong: func() {
+				now := time.Now().UTC()
+				status.LastHeartbeatAt = &now
+				report("connected", nil, 0)
+			},
 		}
 
 		log.Printf(
@@ -235,13 +273,21 @@ func (a *Agent) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if code, text, ok := shared.CloseFromErr(err); ok && code == 4009 {
-			// gateway: uuid already active; retrying will just spam logs.
-			return fmt.Errorf("gateway closed: %d %s", code, text)
+		if time.Since(connectedAt) >= 30*time.Second && status.LastHeartbeatAt != nil && status.LastHeartbeatAt.After(connectedAt) {
+			attempt = 0
 		}
 
 		attempt++
 		wait := reconnectBackoff(rnd, attempt)
+		state := "backoff"
+		if code, _, ok := shared.CloseFromErr(err); ok && code == 4009 {
+			// 旧连接可能尚未被网关清理；保留身份并等待，不抢占、不永久退出。
+			state = "identity_conflict"
+			if wait < 5*time.Second {
+				wait = 5 * time.Second
+			}
+		}
+		report(state, err, wait)
 		log.Printf("[clockbridge-cli] disconnected (attempt=%d) err=%v; reconnect in %s", attempt, err, wait)
 		if !sleepWithContext(ctx, wait) {
 			return ctx.Err()
@@ -348,6 +394,9 @@ func negotiatedProxyModeFromHandshake(resp *http.Response, fallback string) stri
 func (s *connState) run(ctx context.Context) error {
 	s.ws.SetPongHandler(func(appData string) error {
 		_ = s.ws.SetReadDeadline(time.Now().Add(90 * time.Second))
+		if s.onPong != nil {
+			s.onPong()
+		}
 		now := time.Now()
 		if s.lastPongLog.IsZero() || now.Sub(s.lastPongLog) >= 60*time.Second {
 			log.Printf("[clockbridge-cli] heartbeat pong register_url=%s", s.a.registerURL.String())

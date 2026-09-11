@@ -203,6 +203,12 @@ clockbridge-cli \
 - `HTTPS_PROXY_FORCE_LEGACY_MODE`：强制全部回退 legacy（默认 `false`）
 - WebSocket 单条消息读取上限：10MB（gateway/client、gateway/cli、cli/upstream 统一）
 
+## Agent 断线恢复
+
+Agent 对连接失败和断线持续重试，基础等待时间为 1、2、4、8、16、30 秒，附带上下 20% 随机抖动。只有本次连接持续至少 30 秒且收到过 pong，才重置退避；短暂握手成功不会重置。网关返回 `4009 uuid already active` 时保留原 UUID，每次至少等待 5 秒再尝试，等待旧连接释放，不抢占已有连接。取消运行 context 后停止重试。
+
+嵌入方可以通过 `RemoteForwardConfig.OnStatus` 同步接收 `connecting`、`connected`、`backoff`、`identity_conflict`、`stopped` 状态，以及累计失败次数、最近连接与 pong 时间、错误和下次重试时间。回调应快速返回；`connected` 表示 WebSocket 握手完成，最近 pong 时间独立报告隧道心跳。它不证明目标应用可用。
+
 ## Phase5：code-server 轻量验证（本地）
 
 注意：机器内存不多，避免压测或并发开太大。
