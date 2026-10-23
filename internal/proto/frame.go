@@ -7,6 +7,10 @@ import (
 
 const headerBytes = 1 + 4 + 4
 
+// WebSocketFrameOverhead includes the frame header and the message-type byte
+// added when relaying a WebSocket message between gateway and agent.
+const WebSocketFrameOverhead = headerBytes + 1
+
 type Frame struct {
 	Type    byte
 	Stream  uint32

@@ -8,6 +8,7 @@
 - Agent 通过 WebSocket（ws/wss）注册到 Gateway，维持长连接
 - Client 通过 `https://<DOMAIN>/https-proxy/<UUID>/...` 访问
 - HTTP 全量透传：支持 WebSocket Upgrade、流式响应、大文件传输、Trailers
+- Gateway 每通道接收队列为 640 帧；HTTP 数据按最多 32KiB 分块，队列可缓冲约 20MiB 响应数据。队列满时仍会重置该通道，此容量不代表文件大小上限。
 - 浏览器 WebSocket 无法自定义 `Authorization` 请求头；Gateway 支持把 client URL 上的 `access_token` / `authorization` / `token` 查询参数映射为上游 `Authorization: Bearer <token>`，并在转发前从 query 中移除。
 
 ## 本地最小联调（不依赖 Nginx）
@@ -201,7 +202,7 @@ clockbridge-cli \
 - `HTTPS_PROXY_TRANSPARENT_ALLOW_UUIDS`：transparent 白名单（精确 uuid，逗号分隔）
 - `HTTPS_PROXY_TRANSPARENT_ALLOW_PREFIXES`：transparent 白名单（uuid 前缀，逗号分隔）
 - `HTTPS_PROXY_FORCE_LEGACY_MODE`：强制全部回退 legacy（默认 `false`）
-- WebSocket 单条消息读取上限：10MB（gateway/client、gateway/cli、cli/upstream 统一）
+- WebSocket 单条应用消息读取上限：40 MiB（41,943,040 字节，gateway/client 与 cli/upstream 统一）；gateway/cli 注册连接额外预留 10 字节封装开销，确保完整的 40 MiB 消息可以双向转发。更新此上限时需要同时部署 gateway 和对应的 clockbridge-cli。
 
 ## Agent 断线恢复
 

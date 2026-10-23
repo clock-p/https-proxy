@@ -6,7 +6,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const WSReadLimitBytes int64 = 10 << 20
+const WSReadLimitBytes int64 = 40 << 20
 
 func CloseFromErr(err error) (int, string, bool) {
 	if err == nil {

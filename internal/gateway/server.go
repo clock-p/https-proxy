@@ -402,7 +402,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	ws.SetReadLimit(s.wsReadLimitBytes)
+	ws.SetReadLimit(s.wsReadLimitBytes + proto.WebSocketFrameOverhead)
 
 	s.mu.lock()
 	if old := s.agentByUUID[uuid]; old != nil {

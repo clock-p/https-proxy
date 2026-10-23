@@ -11,6 +11,9 @@ import (
 
 var ErrStreamTimeout = errors.New("stream recv timeout")
 
+// HTTP response chunks are at most 32 KiB, so 640 queued chunks hold about 20 MiB.
+const streamReceiveQueueFrames = 640
+
 type stream struct {
 	id uint32
 	c  *agentConn
@@ -28,7 +31,7 @@ func newStream(id uint32, c *agentConn) *stream {
 	return &stream{
 		id:       id,
 		c:        c,
-		rx:       make(chan proto.Frame, 64),
+		rx:       make(chan proto.Frame, streamReceiveQueueFrames),
 		closedCh: make(chan struct{}),
 	}
 }

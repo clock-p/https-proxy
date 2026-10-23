@@ -410,7 +410,7 @@ func (s *connState) run(ctx context.Context) error {
 		_ = s.ws.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second))
 		return nil
 	})
-	s.ws.SetReadLimit(s.a.wsReadLimit)
+	s.ws.SetReadLimit(s.a.wsReadLimit + proto.WebSocketFrameOverhead)
 	_ = s.ws.SetReadDeadline(time.Now().Add(90 * time.Second))
 
 	go s.pingLoop(ctx)
