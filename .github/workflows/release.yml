@@ -31,6 +31,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Test bridge and embedded frpc entrypoints
+        run: go test ./...
       - name: Build release assets
         env:
           CGO_ENABLED: "0"
@@ -41,12 +43,14 @@ jobs:
           GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/clockbridge-gateway_${{ github.ref_name }}_windows_amd64.exe ./cmd/gateway
           GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${{ github.ref_name }}" -o dist/clockbridge-cli_${{ github.ref_name }}_windows_amd64.exe ./cmd/clockbridge-cli
           cp README.md dist/clockbridge_README_${{ github.ref_name }}.md
+          cp third_party/frp/LICENSE dist/clockbridge_FRP_LICENSE_${{ github.ref_name }}.txt
           sha256sum \
             dist/clockbridge-gateway_${{ github.ref_name }}_linux_amd64 \
             dist/clockbridge-cli_${{ github.ref_name }}_linux_amd64 \
             dist/clockbridge-gateway_${{ github.ref_name }}_windows_amd64.exe \
             dist/clockbridge-cli_${{ github.ref_name }}_windows_amd64.exe \
             dist/clockbridge_README_${{ github.ref_name }}.md \
+            dist/clockbridge_FRP_LICENSE_${{ github.ref_name }}.txt \
             > dist/clockbridge_${{ github.ref_name }}_SHA256SUMS
       - name: Release
         uses: softprops/action-gh-release@v2
@@ -57,4 +61,5 @@ jobs:
             dist/clockbridge-gateway_${{ github.ref_name }}_windows_amd64.exe
             dist/clockbridge-cli_${{ github.ref_name }}_windows_amd64.exe
             dist/clockbridge_README_${{ github.ref_name }}.md
+            dist/clockbridge_FRP_LICENSE_${{ github.ref_name }}.txt
             dist/clockbridge_${{ github.ref_name }}_SHA256SUMS

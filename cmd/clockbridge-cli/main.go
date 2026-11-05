@@ -15,6 +15,8 @@ import (
 
 	"github.com/clock-p/clockbridge/internal/reverseproxy"
 	"github.com/clock-p/clockbridge/pkg/clockbridge"
+	frpc "github.com/fatedier/frp/cmd/frpc/sub"
+	frpsystem "github.com/fatedier/frp/pkg/util/system"
 )
 
 var version = "dev"
@@ -28,6 +30,15 @@ const (
 )
 
 func main() {
+	// Select before bridge's flag parser runs. All remaining arguments belong
+	// to upstream frpc, including flags whose meaning differs from bridge.
+	if len(os.Args) > 1 && os.Args[1] == "--frp" {
+		os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+		frpsystem.EnableCompatibilityMode()
+		frpc.Execute()
+		return
+	}
+
 	localSpec := flag.String("L", "", "local forward ([bind_addr:]port)，例如 127.0.0.1:28789")
 	remoteTarget := flag.String("R", "", "remote forward target URL，例如 http://127.0.0.1:18789/ 或 tcp://127.0.0.1:22")
 	proxyMode := flag.String("proxy-mode", clockbridge.ProxyModeLegacyFramed, "register proxy mode: legacy_framed|transparent_tunnel")
@@ -79,6 +90,7 @@ func usage() {
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  clockbridge-cli -R <target_url> <uuid>@<register_host>")
 	fmt.Fprintln(out, "  clockbridge-cli -L [bind_addr:]<port> <upstream_url>")
+	fmt.Fprintln(out, "  clockbridge-cli --frp [frpc arguments]  (frpc v0.71.1; --frp must be first)")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
 	fmt.Fprintln(out, "  clockbridge-cli -i /path/to/token.txt -x-token <TOKEN> -R http://127.0.0.1:18789/ demo@register-https-proxy.example.com")
