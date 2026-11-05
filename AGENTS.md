@@ -13,8 +13,10 @@
 - agent register 与上游转发：`internal/agent/agent.go`
 - proxy mode / target kind 共享语义：`internal/shared/proxymode.go`
 - CLI 参数与 register URL 组装：`cmd/clockbridge-cli/main.go`
-- 行为测试：`cmd/clockbridge-cli/main_test.go`
+- CLI 首参数 `--frp` 直接进入固定 v0.71.1 的官方 frpc 命令入口，其余参数完全由 frpc 解析；默认仍是 bridge。两套 token/`-i` 参数语义不能混用，不在此处添加私有 web 鉴权策略。
+- 行为测试：`cmd/clockbridge-cli/main_test.go`、`cmd/clockbridge-cli/dispatch_test.go`（子进程验证入口、配置错误及默认 bridge 转发）
 - 环境变量与运行说明：`README.md`
+- Go 版本与 frp 固定依赖：`go.mod`、`go.sum`（frp v0.71.1 要求 Go 1.26+）；frp 许可：`third_party/frp/LICENSE`
 
 ## 3. 变更要求
 

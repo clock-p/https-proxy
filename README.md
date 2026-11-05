@@ -96,6 +96,32 @@ clockbridge-cli -L [bind_addr:]<port> <upstream_url>
 
 注意：`clockbridge-cli` 参数遵循 Go flag 规则，选项请放在位置参数之前。
 
+### 内置 frpc v0.71.1
+
+同一个 `clockbridge-cli` 二进制也包含官方 frpc。将 `--frp` 放在**第一个参数**，后续参数直接交给 frpc；省略它仍使用上述 bridge 命令行：
+
+```bash
+clockbridge-cli --frp --version       # 0.71.1
+clockbridge-cli --frp --help
+clockbridge-cli --frp tcpmux --help
+clockbridge-cli --frp verify -c /path/to/frpc.toml
+clockbridge-cli --frp -c /path/to/frpc.toml
+```
+
+`--frp` 只选择命令入口，不重写配置、域名或鉴权，也不启动外部 frpc 进程。配置错误会按 frpc 原生行为报错退出，不切回 bridge。不使用 `--mode=frp`。
+
+frp 模式的 token/auth/tokenSource 在原生配置中设置，不能套用 bridge 的认证参数：frpc 子命令中的 `-i` 表示本地 IP（`--local-ip`），`--token` 是原生共享密钥。若服务端接受文件提供的 OIDC token，使用 `auth.oidc.tokenSource.file`；具体 token 来源和访问策略由服务端控制面决定。bridge 的 `CLOCKBRIDGE_HTTPS_PROXY_TOKEN*` 环境变量只作用于默认 bridge 命令行。
+
+内置的是 frpc 命令行、转发及管理 API，不打包 frpc 管理面板的前端静态文件。依赖固定为 `github.com/fatedier/frp v0.71.1`，保留其 Apache-2.0 许可（`third_party/frp/LICENSE`）。
+
+编译需要 Go 1.26+，无需 CGO：
+
+```bash
+go test ./...
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tmp/clockbridge-cli ./cmd/clockbridge-cli
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/clockbridge-cli.exe ./cmd/clockbridge-cli
+```
+
 ### 1) `-R`：注册隧道（本地服务暴露到受管域名）
 
 ```bash
